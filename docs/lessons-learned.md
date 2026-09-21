@@ -51,3 +51,162 @@
 
 - 推送 GitHub 报 `TLS connect error`：本机有本地代理，Git 默认 OpenSSL 后端过不去，加 `-c http.sslBackend=schannel` 解决。
 - 报告与文档里出现乱码字符（间歇性）：长文档生成后应做一次非中文字符扫描再交付。
+
+---
+
+## 2026-09-21 · game-research 构建实战：喵喵小馆（微信小游戏·合成经营）
+
+**case**：调研「合成玩法 + 猫咪餐厅模拟经营」微信小游戏（IAA 为主）可行性。
+产出：[`skills/game-research/examples/喵喵小馆-微信小游戏合成经营立项调研报告.md`](skills/game-research/examples/喵喵小馆-微信小游戏合成经营立项调研报告.md)
+判决：`🧪 先验证`（版号口径未取证 + LTV≥CPI 未验证，需 Demo + 小测解除）
+
+### G1. 版号口径是「二手来源互相矛盾」的极端案例（L2 的升级版）
+
+- 搜「微信小游戏 纯广告变现 要不要版号」，前 5 条**全是资质代办/SEO 页，且互相打架**：A 说纯广告不需要版号；B 说 2025 起小游戏不再豁免；C（Unity 社区）说企业无内购仅需软著+自查。
+- **比 L2 更狠**：不是「有二手」，是「二手之间自相矛盾」。模型若随手取一条当结论，判决地基直接错。
+- **做法**：Skill 写明「多条冲突只取①权威（NPPA/微信开放社区），否则标 ⬜ 未取证并转为打电话确认的待办，不得写进判决依据」。已写进 game-research SKILL.md 红线与 GATEWAY 取证纪律。
+
+### G2. 单位经济（LTV−CPI）×规模 是游戏第二道硬筛子
+
+- App 立项还能靠「工具价值」留存；游戏纯靠留存 + 买量。指色网络「生死公式」利润=(LTV−CPI)×规模，CPI>LTV 时研发越精越亏。
+- **做法**：ECON 步强制算生死公式 + 盈亏平衡 SOM，LTV/eCPM 假设项一律标 ⬜，禁止用记忆数字。
+
+### G3. 头部固化是游戏特有风险，品类饱和度必须单列
+
+- 2025 微信小游戏 MAU 破千万 28 款、畅销榜固化，新团队入场门槛抬到原生 App 级（游犀牛/GameLook）。
+- **做法**：MARKET 步单列「品类饱和度」（红海/新品斜率/头部固化），不能只看 TAM 量级。
+
+### G4. 想法验证的最小成本动作：软著+自查版 IAA Demo + ¥2–3 万买量
+
+- 比「先做完整游戏」便宜约 10 倍，且能直接证伪单位经济（实测 D1/D7 留存 + CPI + eCPM → 反推 LTV）。
+- **做法**：🧪 先验证 判决的「最便宜的验证」默认 ≤2 周、小预算买量，明确验证哪条主张。
+
+### G5. 楔子四法（可直接复用的框架）
+
+- 指色网络实战四种立项方法论：玩法融合 / 经典玩法二创 / 情绪革新 / 榜单变体。已写进 RIVAL 步，比通用「找差异化」更可操作。
+
+### G6. 工具侧：WebFetch 可替代坏掉的 Bash 查 SkillHub JSON API
+
+- 本机 Bash 工具无法执行命令；用 WebFetch 直查 `lightmake.site/api/v1/search` 拿 JSON 结果可行。
+- SkillHub 中文 query 命中差，英文 `game` 命中好——市场调研时中英文都要试。
+
+---
+
+## 2026-09-21 · game-research v1.1 评估优化（grill-method 拷问后）
+
+用 grill-method 把 v1.0 当「有罪推定」对象逐方向攻击（假设/权衡/失败模式/更优替代），发现漏了第三筛子与验证阶梯，遂升 v1.1。
+
+### G7. 原 v1.0 漏了「玩法成立」第三道独立筛子
+
+- v1.0 把"玩法成立"当默认前提，只硬方法化版号+买量。但游戏真实是三道独立筛子（玩法×版号×买量），玩法好不豁免后两道，后两道也不豁免玩法。
+- **做法**：新增 Step 6 PLAY，用 Schell build-a-toy 镜（Lens 15「没目标也让人想玩吗」）+ L1 可玩切片 5–10 人 playtest 证"核心循环好玩吗"，PLAY=🔴 时不得判立项。
+
+### G8. 原「最便宜验证 = 做 Demo+买量 ¥2–3 万」是错的
+
+- 它跳过了最便宜的 ¥0 验证。Zynga 用 5 词 pitch+广告测点击决定是否建；GameAnalytics painted-door 用"即将上线"按钮点击率证需求（hint 15%→建，multiplayer <2%→砍）。
+- **做法**：新增 Step 6½ PROVE 验证阶梯 L0(¥0 fake-door/concept-ad)→L1(¥0 切片)→L2(Demo)→L3(soft-launch)，最便宜先上，不得跳级烧钱。
+
+### G9. 三战场的「先验证」机制不同，不得混
+
+- 微信小游戏靠自查版 IAA Demo+买量实测 CPI/D1/D7/eCPM；出海/iOS 靠 soft-launch(CA/AU/NZ/PH) 读 D1/D7/D30/ARPDAU 品类基准；Steam 靠 wishlist(7k 地板, 收入≈WL×$5)。
+- **做法**：PROVE 步按 GATE 战场映射 KPI 门与量化 kill 阈值，VERDICT 放弃信号必须含量化阈值。
+
+### G10. 让「放弃信号」可证伪：引入量化 kill 纪律
+
+- Supercell ~90% 砍掉率；行业硬阈值 D1<30% 停 UA、soft-launch 三留存未达标→迭代或砍、Steam WL<5k 弱转化→重做。
+- **做法**：VERDICT 放弃信号必须含 PROVE 量化阈值，不能只写"数据不好就放弃"——借口式收尾正是 AGENTS.md 禁止的。
+
+---
+
+## 2026-09-21 · 同想法 v1.0 vs v1.1 重报对比（暴露方法论窟窿）
+
+**动作**：用 v1.1 完整 8 步把同一想法（喵喵小馆）从零重报，与 v1.0 样例对峙，产出 `examples/喵喵小馆-v1.1-立项调研报告.md` 与 `examples/v1.0-vs-v1.1-对比分析.md`。
+
+### G11. 「判决相同」≠「方法够用」——同想法两版对比最能暴露窟窿
+
+- 喵喵小馆两版都判 `🧪 先验证`，表面一致，但 v1.0 的「最便宜验证」直接是 **L3（¥2–3 万做 Demo+买量）**，v1.1 要求先 **L0/L1（¥0）**。v1.0 会在烧钱后才可能在 playtest 发现「经营线没人爱玩」。
+- **做法**：评估 Skill 升级是否真有效，**拿同一想法跑两版报告对峙**，比单看 v1.1 更能定位 v1.0 放过的窟窿（玩法当默认 / 验证跳级烧钱 / 团队能力不评估）。这应成为本仓库「Skill 自测」的标准动作。
+
+### G12. 团队能驾驭是 v1.0 完全漏掉的真实 kill 因子
+
+- 喵喵小馆是 2 人小团队，美术/数值/买量/合规 4 项硬缺口；v1.0 的 FRAME 没逼问，用户易误以为「2 人能做 MVP」=「能跑通」。
+- **做法**：FRAME 显式列「能力清单 有/缺口」，缺口即待办，不得用「招人就解决」糊弄。立项可行性 = 市场 × 合规 × 经济 × **团队做不做得出**。
+
+### G13. v1.1 的 residual gaps（诚实标注，待独立 case 填）
+
+- PLAY 仍需用户执行，Skill 只能逼问不能代测；KPI 门基准是方向性、须每次现场重取；团队缺口未量化「到几个才 kill」；未取证项（版号口径）不因病升级消失；Steam/出海 KPI 门本次未实战（喵喵小馆是微信小游戏）。
+- **做法**：下一步用出海 / Steam 真实想法各跑一份，验证 soft-launch / wishlist KPI 门可用性，填 residual gap #5。
+
+---
+
+## 2026-09-21 · Steam 出海 case：草木集（填 residual gap #5 的 wishlist 门）
+
+**动作**：用 v1.1 完整 8 步跑「草木集·中式草木炼金 cozy 经营 sim·Steam 全球出海（Premium）」，与喵喵小馆（微信小游戏）对照。产出 `examples/草木集-Steam出海-cozy炼金经营立项调研报告.md`。
+
+### G14. 出海走全球 Steam，版号这道心脏直接被解除——GATE 取证结论随战场剧变
+
+- 全球 Steam（store.steampowered.com）**不强制中国版号**；戴森球计划（中文团队 Youthcat）即无版号全球出海成功先例。喵喵小馆的版号口径是 ⬜ 阻塞项，本 case 直接 ✅ 通行。
+- **做法**：GATEWAY 合规快照表必须按战场填写，"无版号"是出海战场的真实结论，不是漏查。版号心脏解除后，硬闸门从「合规」转移到「wishlist/销量」——这正是 PROVE 的 Steam KPI 门要兜的。Skill「先定战场」铁律在此得到强验证。
+
+### G15. Steam wishlist KPI 门可用，且 PROVE 按战场映射出完全不同的验证动作（填 gap #5）
+
+- 7k 发布地板 / 中位 12% 转化 / Next Fest 进 Fest 前 <1k wishlist 几乎无法破圈（中位仅 +200）——作 PROVE 量化 kill 阈值写进 VERDICT，能兜「没人 wishlist 就别硬上」。
+- **对照**：喵喵小馆 PROVE = 自查版 IAA Demo + 小流量买量测 CPI/D1/D7/eCPM；本 case PROVE = Steam 页面 + Next Fest Demo 攒 wishlist + 12% 转化。同一 Skill 的 PROVE 按战场映射出不同动作与 kill 阈值，坐实 v1.1 G9「三战场不得混」。
+- **残留**：soft-launch 移动端 KPI 门（CA/AU/NZ/PH、D1/D7/D30/ARPDAU）仍未实战，建议下一个 case 用出海移动 F2P 想法跑通。
+- **新发现**：Steam 战场团队的最大 kill 因子不是玩法而是**营销动量缺口**（Next Fest 数据：pre-fest wishlist 动量决定一切）——FRAME 团队能驾驭清单在 Steam 战场应重点标「发行/营销」缺口。
+
+---
+
+## 2026-09-21 · 从业者审视视角（practitioner-review 八轴）拷问两份报告
+
+**动作**：以「真把游戏做上线的制作人」视角，用新增的 `references/practitioner-review.md` 八轴框架，逐轴拷问喵喵小馆 v1.1 与 草木集 v1.1 两份报告。产出 `examples/从业者审视-喵喵小馆与草木集.md`，并把发现吸收进 SKILL.md 升 v1.2。
+
+### G16. 方法对 ≠ 真实世界能活：需要第二把尺子（grill-method 之外）
+
+- 两份报告都过 **grill-method 镜**（方法合格：判决落地、证据分级、验证阶梯不跳级），但都**不过 practitioner-review 镜**——暴露「成本只算运营口径、内容产能缺口未评、验证期无 time-box、平台变量风险加权不足」等真实世界 survivability 盲区。
+- **结论**：grill-method 审「方法」、practitioner-review 审「落地」，两镜**正交互补**，合称「报告双镜自审」。只过一镜不算完整交付。这应成为本仓库游戏类 Skill（及可推广到 app-market-research）的自审标准动作。
+
+### G17. 同源软肋 = 框架级缺口，须吸收进 Skill 而非个案修补
+
+- 两份报告暴露**同一组**软肋，说明是 game-research 框架本身漏了，不是笔误：
+  1. **研发沉没成本没进 SOM**（盈亏平衡 SOM 只算运营现金流回正，漏 3–6 月研发 + 软著 + 防沉迷 + 长线内容产能）；
+  2. **内容产能 vs 长线缺口未评**（双循环/长线系统蜜月期后内容军备竞赛，小团队扛不住）；
+  3. **验证期无 time-box**（「先验证」变「永远在填坑」，小团队头号死因）；
+  4. **平台可控变量当定值**（自然量/可见性/eCPM 季节波动须风险加权，给腰斩情景）。
+- **做法**：吸收进 ECON（双成本 + 平台变量加权）、PROVE（验证期 ≤ 8–10 周 time-box 硬纪律）、FRAME（团队缺口量化「缺口 ≥ N 个或验证期 > 8 周即二判」），SKILL.md 升 v1.2.0。
+
+### G18. 双镜自审可推广：从业者八轴对 App/小程序立项同样锋利
+
+- practitioner-review 的八轴（尤其 A 成本完整性、C 团队可持续性、H 退出纪律）对准 App/小程序立项同样能戳穿「方法对但真实世界翻车」——例如 app-market-research 的 SOM 是否算研发沉没、验证期是否 time-box。
+- **做法**：下一步评估是否把「双镜自审」抽象成本仓库通用自审协议（grill-method × practitioner-review），供所有调研 Skill 复用。
+
+---
+
+## 2026-09-21 · 双镜自审抽象为仓库通用协议 + 移动 F2P 验证（填 soft-launch 门）
+
+**动作 A**：把「双镜自审」从 game-research 私有实践抽象为仓库通用协议 `docs/dual-mirror-review.md`（grill-method 方法镜 × practitioner-review 落地镜，正交互补，八轴通用）；game 与 app 各建 `references/practitioner-review.md` 只写领域实例化，通用轴/循环/红线/标记零重复。app-market-research 升 v1.1.0 接入双镜。
+
+### G19. 双镜协议零改造跨 Skill 复用，验证成功
+
+- game-research/references/practitioner-review.md 与 app-market-research/references/practitioner-review.md 都只写「本领域的八轴提示 + 真实 kill 案例」，通用轴/4 步循环/红线/判定标记统一在 `docs/dual-mirror-review.md`。
+- **好处**：八轴在 game/app 是同一组盲区，一处更新全员受益；跨 Skill 报告可用同一套标记（过/⚠️/🔴/不适用）比盲区轻重；新 Skill（如 career-research）写完自动获得双镜能力。
+- **做法**：每个调研 Skill 只需两件事——SKILL.md 加「报告双镜自审」节引用共享协议 + references/ 下建领域实例化。已写入共享协议「各 Skill 如何接入」节。
+
+**动作 B**：用通用协议八轴审 app-market-research 既有样例「家庭药箱」，验证「八轴对 App 立项同样锋利」。
+
+### G20. 八轴对 App 立项同样锋利（实测证明，非推断）
+
+- 家庭药箱报告过方法镜合格（判决落地/证据分级/验证≤1天），过落地镜暴露 **5 处 ⚠️**：①研发沉没没进 SOM（只算运营年成本）；②「找 2 名药学人员」无 deadline；③微信 AI 类目口径突变需持续复验；④上线后巨头下场/算法变天未给动作；⑤验证期无 time-box（独立开发者易陷无限准备）。
+- **关键发现**：这 5 处与 game-research v1.0 当年漏的**同源软肋**（研发沉没 SOM、验证期 time-box）——证明是「立项调研」通用盲区，不是游戏专属。家庭药箱在 C（团队不可解量化）和 F（机会成本）上反而比游戏 v1.0 更稳，说明 app-market-research 先天逼问更早。
+- **做法**：5 处 ⚠️ 吸收进 app-market-research SKILL.md v1.1（MARKET SOM 含研发沉没+合规时间成本；VERDICT「先验证」带总 ≤8–10 周 time-box 硬纪律；验证清单加双镜项）。产出 `app-market-research/examples/从业者审视-家庭药箱.md` 作跨 Skill 复用实证。
+
+**动作 C**：用 v1.2 完整 8 步跑「矿洞物语·放置挂机卡牌 RPG·出海 SEA（PH/ID，IAP+激励视频，soft-launch）」，填 residual gap #5 的 soft-launch 移动端 KPI 门。
+
+### G21. 移动 F2P soft-launch 门实战，三战场 KPI 门现已全通
+
+- 产出 `skills/game-research/examples/矿洞物语-出海SEA-挂机放置卡牌RPG立项调研报告.md`，判决 `🧪 先验证`。
+- **soft-launch 移动门（填 gap #5）**：mid-core 留存门 D1 35%+/D7 15%+/D30 8%+（GameGrowthAdvisor 2026）、ARPDAU>$0.30（IAP-led 健康线，Zorka 2026）、D1<30% 立即停 UA；预算 $50–120k / 8–12 周（产品验证费非营销费）。
+- **出海无版号 = 版号心脏解除**（与喵喵小馆 ⬜ 阻塞对照）：硬闸门从「合规」转「soft-launch KPI 门」，强验证 GATE「先定战场」铁律。
+- **SEA 专属真证据**：reach-and-conversion 市场（$0.32 IAP/install/季，impulsemediahub）、DCB 运营商直连计费是付费主通道、PH CPI $0.45（TikTok）、新游存活仅 11%（inwwin）——这些成 VERDICT 放弃信号的量化锚。
+- **残差**：idle RPG 头部固化（月 IAP plateau $130M，AppMagic）+ 内容军备竞赛仍是最大长线风险，已计入 FRAME 致命风险与团队产能缺口；越南源码审查 45–60 天（若进副战场）仍 ⬜ 延后取证。
+- **结论**：game-research 的三战场 KPI 门（微信买量 / soft-launch / Steam wishlist）现已全部实战跑通，residual gap #5 关闭。

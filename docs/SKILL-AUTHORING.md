@@ -139,3 +139,5 @@ Skill 写完不算完成，必须：
    - 有没有哪条规则在这次实战中失效或多余？
 
 **把复盘的结论回写到 SKILL.md 和 `docs/lessons-learned.md`。** Skill 是在真实 case 里长出来的，不是在编辑器里想出来的。
+
+> **双镜自审是交付前的标准动作**：每份报告必须过两把尺子——`grill-method` 审方法（流程/路线）、`practitioner-review` 审真实世界 survivability（八轴盲区）。通用协议见 [`docs/dual-mirror-review.md`](docs/dual-mirror-review.md)。本仓库每个调研 Skill 在 `references/` 下建一个领域实例化（`practitioner-review.md`）即可零改造复用，八轴原文不重复写。新 Skill 写完自动继承双镜能力。
