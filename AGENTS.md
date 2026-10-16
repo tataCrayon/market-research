@@ -13,6 +13,11 @@
 | Skill | 覆盖领域 | 心脏（该领域的专属步骤） |
 |---|---|---|
 | `app-market-research` | App / 小程序立项：市场 → 竞品 → 三端合规 → 做不做 | **PLATFORM 三端硬约束七查** |
+| `game-research` | 游戏 / 小游戏立项：市场 → 竞品 → 版号合规 → 买量单位经济 → 玩法成立 → 做不做 | **三道独立筛子（版号 × 买量 × 玩法）**：版号决定能不能上线，LTV−CPI 决定能不能回本 |
+| `career-research` | 职业 / 岗位调研（三模式）：岗位列表 → JD 取证 → 命中矩阵 → 判决；能力自查；外包名单维护 | **JD 真取证 × 可迁移证据链对账**：岗位名会蒸发，只有真实 JD + 官方职业编码才算证据 |
+| `account-research` | 自媒体账号调研（v0.1：小红书对标拆解）：公开数据取证 → 四层拆解 → 可抄清单 × 死亡清单 → 抄不抄 | **平台特异指标 × 可取证边界**：指标跨平台不可移植，公开可见 ≠ 后台可得，拿不到写 ⬜ 未取证 |
+
+> `account-research` 的立项依据存档见 [`skills/account-research/立项.md`](skills/account-research/立项.md)（真相源在仓库外，两者冲突时以外部 idea.md 当前版本为准）。
 
 **为什么调研要写成 Skill，而不是写在提示词里**：不落成规则，AI 每次都会给出「这个方向很有前景，建议进一步调研」这类和稀泥结论。调研的价值不在信息量，在**判决**。
 
@@ -35,6 +40,7 @@ README.md                          给人看：是什么、有什么、怎么用
 docs/SKILL-AUTHORING.md            怎么写一个调研 Skill（方法论）
 docs/lessons-learned.md            实证记录：踩过的坑（按时间追加，不删旧条目）
 skills/<name>/SKILL.md             每个 Skill 的入口
+skills/<name>/立项.md              可选：该 Skill 的立项依据存档（目标 sharpen / 价值判决 / 能力地图 / 路线图；真相源在仓库外时注明指向）
 skills/<name>/references/*.md      该 Skill 的深度资料（清单、字段表、检索模板）
 skills/<name>/examples/*.md        该 Skill 的真实产出样例（至少一份）
 skills/_template/SKILL.md          新 Skill 的空模板（复制即用）
