@@ -15,8 +15,9 @@
 | [`app-market-research`](skills/app-market-research/SKILL.md) | App / 小程序立项：市场 → 竞品 → 三端合规 → 做不做 | **三端硬约束七查** + **双镜自审**（v1.1 接入通用协议）：上架门槛 / 审核红线 / 资质备案 / 能力边界 / 付费分成 / 分发获客 / 成本周期 |
 | [`game-research`](skills/game-research/SKILL.md) | 游戏 / 小游戏立项：市场 → 竞品 → 版号合规 → 买量单位经济 → 玩法成立 → 验证阶梯 → 做不做 | **三道独立筛子（版号 × 买量 × 玩法）+ 双镜自审**：版号决定能不能上线，LTV−CPI 决定能不能回本，玩法成立决定有没有人玩 |
 | [`career-research`](skills/career-research/SKILL.md) | 职业 / 岗位调研（三模式）：**A** 岗位列表 → 职责与要求取证（含**用工性质/外包识别**）→ 命中矩阵与差距清单 → 判决；**B 岗位能力自查**；**C 外包名单维护** | **JD 真取证 × 可迁移证据链对账**：岗位名会蒸发，只有真实 JD + 官方职业编码才算证据；「3 年**相关**经验」的「相关」二字是转岗者的隐性硬门槛；**同一岗位名在自有/派遣/外包下是完全不同的选项**；自查的心脏是**证据件**——无证据的等级不作数 |
+| [`account-research`](skills/account-research/SKILL.md) | 自媒体账号调研（**v0.1 骨架，真实 case v0.2**）：小红书对标拆解——公开数据取证 → 定位/选题/结构/变现四层拆解 → 可抄清单 × 死亡清单 → 抄不抄；账号诊断（没流量原因）v0.3 起 | **平台特异指标 × 可取证边界**：指标跨平台不可移植（拿抖音完播率判小红书 = 作废），公开可见 ≠ 后台可得，拿不到写 ⬜ 未取证；爆文率先取证定义再计算；**⏸「只观察」是公开数据撑不起结论时的正确结局**（须带补数据清单 + ≤7 天预算 + 到期降级 ❌，防变和稀泥） |
 
-规划中（欢迎按模板贡献）：暂无——下一个领域请按 [`docs/SKILL-AUTHORING.md`](docs/SKILL-AUTHORING.md) 自建，心脏步骤须与现有 Skill 不同。
+规划中（欢迎按模板贡献）：暂无新领域——下一个领域请按 [`docs/SKILL-AUTHORING.md`](docs/SKILL-AUTHORING.md) 自建，心脏步骤须与现有 Skill 不同。
 
 ---
 
@@ -90,6 +91,14 @@ skills/game-research/
     ├── 草木集-Steam出海-cozy炼金经营立项调研报告.md    Steam 出海 case（填 wishlist KPI 门）
     ├── 矿洞物语-出海SEA-挂机放置卡牌RPG立项调研报告.md  移动 F2P 出海 case（填 soft-launch 移动端 KPI 门，关 residual gap #5）
     └── 从业者审视-喵喵小馆与草木集.md                  从业者八轴拷问两份报告（双镜自审实证）
+
+skills/account-research/
+├── SKILL.md                        v0.1 对标拆解骨架(小红书) + 封闭判决五选一 + 红线(R1隐私/R2零爬虫/R3口径/R4基准/R6相关≠因果) + 双镜自审
+├── references/
+│   ├── xiaohongshu-metrics.md          小红书指标字典：口径标注流程(公开页/后台/工具/不可得) + 账号/内容层指标表 + 爆文率定义分歧 + 基准区间取证规则
+│   ├── output-html-template.md         HTML 输出模板：git式占比条 + 账号库页面 + 数据图（暖白纸张底/松绿/陶土 token + DOM工程卫生清单）
+│   └── practitioner-review.md          从业者审视八轴 + 账号领域 I/J 补充轴实例化（落地镜）
+└── examples/                        v0.2 建立（真实 case 后）
 ```
 
 **`references/` 里故意不写死政策数字**——政策按季度变，任何写死的数字都会在下一次调研时变成假证据。
