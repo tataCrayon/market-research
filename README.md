@@ -75,6 +75,7 @@ skills/app-market-research/
 │   └── practitioner-review.md          App/小程序从业者审视八轴实例化（落地镜）
 └── examples/
     ├── 家庭药箱小程序-立项调研报告.md    真实产出样例（含明确判决）
+    ├── 归期簿-上线前立项调研报告.md      产品已建成场景样例（判决 ⏸ 卡合规 + 首发去 AI 解锁路径）
     └── 从业者审视-家庭药箱.md           通用八轴审 App 样例（双镜协议跨 Skill 复用实证）
 
 skills/game-research/
