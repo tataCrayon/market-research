@@ -12,3 +12,4 @@ node_modules/
 _*.py
 _*.txt
 .workbuddy/
+account/          # 采集原始存档（含采集者会话数据，仅本地留存）
