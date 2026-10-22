@@ -1,6 +1,6 @@
 # 从业者审视框架（Practitioner Review · 游戏实例化）
 
-> **本文件是通用协议 [`docs/dual-mirror-review.md`](../../docs/dual-mirror-review.md) 在游戏/小游戏立项领域的八轴实例化。**
+> **本文件是通用协议 [`docs/dual-mirror-review.md`](../../../docs/dual-mirror-review.md) 在游戏/小游戏立项领域的八轴实例化。**
 > 通用轴、4 步循环、红线、判定标记一律见共享协议，**本文件只写游戏领域的专属提示与真实 kill 案例**，避免重复。
 >
 

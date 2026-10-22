@@ -8,16 +8,17 @@
 
 ## 1. 这个仓库是什么
 
-一组**调研 Skill** 的合集。每个 Skill 教 AI 怎么把一类「说不清的问题」变成**有证据、有判决**的结论。
+一组**调研 Skill** 的合集，外加**一个由 Skill 成长而来的产品项目**（`account-research`）。每个 Skill 教 AI 怎么把一类「说不清的问题」变成**有证据、有判决**的结论。
 
 | Skill | 覆盖领域 | 心脏（该领域的专属步骤） |
 |---|---|---|
 | `app-market-research` | App / 小程序立项：市场 → 竞品 → 三端合规 → 做不做 | **PLATFORM 三端硬约束七查** |
 | `game-research` | 游戏 / 小游戏立项：市场 → 竞品 → 版号合规 → 买量单位经济 → 玩法成立 → 做不做 | **三道独立筛子（版号 × 买量 × 玩法）**：版号决定能不能上线，LTV−CPI 决定能不能回本 |
 | `career-research` | 职业 / 岗位调研（三模式）：岗位列表 → JD 取证 → 命中矩阵 → 判决；能力自查；外包名单维护 | **JD 真取证 × 可迁移证据链对账**：岗位名会蒸发，只有真实 JD + 官方职业编码才算证据 |
-| `account-research` | 自媒体账号调研（v0.1：小红书对标拆解）：公开数据取证 → 四层拆解 → 可抄清单 × 死亡清单 → 抄不抄 | **平台特异指标 × 可取证边界**：指标跨平台不可移植，公开可见 ≠ 后台可得，拿不到写 ⬜ 未取证 |
+| `account-research`（**产品项目**，根目录） | 自媒体账号调研（v0.1：小红书对标拆解）：公开数据取证 → 四层拆解 → 可抄清单 × 死亡清单 → 抄不抄 | **平台特异指标 × 可取证边界**：指标跨平台不可移植，公开可见 ≠ 后台可得，拿不到写 ⬜ 未取证 |
 
-> `account-research` 的立项依据存档见 [`skills/account-research/立项.md`](skills/account-research/立项.md)（真相源在仓库外，两者冲突时以外部 idea.md 当前版本为准）。
+> `account-research` 的立项依据存档见 [`account-research/skill/立项.md`](account-research/skill/立项.md)（真相源在仓库外，两者冲突时以外部 idea.md 当前版本为准）。
+> **形态特例（2026-10-22 起）**：`account-research` 已按产品立项调研判决（「Skill 先行、Web 放大」）从 `skills/` 提升为根目录产品项目，方法论收在其 `skill/` 子目录，工程在 `src/`、`web/`。它是唯一特例——**其余 Skill 仍按 `skills/<name>/` 约定放置**；只有当某个 Skill 也走完产品化立项调研并判决「做成产品」，才按同样方式提升，并在本表与 §3 登记。项目级契约见 [`account-research/AGENTS.md`](account-research/AGENTS.md)（继承本文件铁律，不重复）。
 
 **为什么调研要写成 Skill，而不是写在提示词里**：不落成规则，AI 每次都会给出「这个方向很有前景，建议进一步调研」这类和稀泥结论。调研的价值不在信息量，在**判决**。
 
@@ -39,15 +40,18 @@ AGENTS.md                          本文件：仓库契约（唯一真相源）
 README.md                          给人看：是什么、有什么、怎么用
 docs/SKILL-AUTHORING.md            怎么写一个调研 Skill（方法论）
 docs/lessons-learned.md            实证记录：踩过的坑（按时间追加，不删旧条目）
-skills/<name>/SKILL.md             每个 Skill 的入口
+skills/<name>/SKILL.md             每个 Skill 的入口（产品项目除外，见下）
 skills/<name>/立项.md              可选：该 Skill 的立项依据存档（目标 sharpen / 价值判决 / 能力地图 / 路线图；真相源在仓库外时注明指向）
 skills/<name>/references/*.md      该 Skill 的深度资料（清单、字段表、检索模板）
 skills/<name>/examples/*.md        该 Skill 的真实产出样例（至少一份）
 skills/_template/SKILL.md          新 Skill 的空模板（复制即用）
+account/                           采集原始存档（gitignore，仅本地；account-research 项目用）
+account-research/                  产品项目（形态特例，见 §1）：skill/ 方法论 + src/ 工程 + web/ 副端 + tests/ + docs/ + data/
 ```
 
 **命名**：`<领域>-research`，全小写连字符。例：`app-market-research`、`game-research`、`career-research`。
 **禁止**：把多个领域的调研塞进同一个 Skill；领域不同 = 心脏步骤不同 = 必须分开。
+**产品项目提升条件**（缺一不可）：① 该 Skill 已跑通真实 case ② 已按 app-market-research 做完产品化立项调研并判决「做成产品」③ 在本文件 §1 与 §3 登记。未满足而把 Skill 搬出 `skills/` = 破坏目录约定。
 
 ---
 
@@ -112,7 +116,7 @@ frontmatter 必需字段：`name`、`description`（含触发词，中文优先�
 
 ## 8. 维护约定
 
-- **真相源**：本仓库是这些调研 Skill 的唯一真相源。`tataCrayon/app-market-research` 是从这里同步出去的**单技能分发版**；改完这里要记得同步过去（见 README 的「同步」一节）。
+- **真相源**：本仓库是这些调研 Skill 的唯一真相源。`tataCrayon/app-market-research` 与 `tataCrayon/game-research` 是从这里同步出去的**单技能分发版**；改完这里要记得同步过去（见 README 的「同步」一节）。`account-research` 是产品项目，暂无分发版——将来分发时同步的是其 `skill/` 子目录整体。
 - **提交信息**：`<type>: <中文简述>`，type 取 `feat` / `fix` / `docs` / `skill`（新增 Skill 用 `skill`）。
 - **一本账**：每次新增或实质修改 Skill，往 `docs/lessons-learned.md` 追加一条实证。
 

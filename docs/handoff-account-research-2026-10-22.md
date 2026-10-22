@@ -2,6 +2,8 @@
 
 > **用途**：跨机器接续。另一台电脑 `git pull` 后读本文件即可恢复全部上下文。
 > **真相源**：本仓库 `tataCrayon/market-research`（main 分支）。本地 `.workbuddy/memory/` 被 gitignore，不随仓库同步——关键信息已誊入本文件。
+>
+> **⚠️ 结构变更注记（2026-10-22 12:30，存档之后发生）**：`account-research` 已从 `skills/` 提升为根目录**产品项目**——方法论整体迁至 `account-research/skill/`，工程骨架在 `account-research/{src,web,tests,docs,data}/`。本文件下文中的 `skills/account-research/...` 路径一律读作 `account-research/skill/...`；文件地图以本章第七节更新版为准。
 
 ---
 
@@ -26,7 +28,7 @@
 |---|---|---|---|
 | 1 | 用户补存 **3 篇详情页 HTML**（爆款 4,562「对不起，AI这个速度…」+ 中位 373「实测好用的10个prompt」+ 近期 10-21「爆肝两天，我给AI造了座赛博工厂！」） | 用户（约 3 分钟） | 回传后我补 §4 结构卡 / §5 变现图 / 单篇赞藏比，判决可升 🔧 |
 | 2 | **动态重跑**（v0.2 毕业三条件之三，唯一未做）：换数据源撞结论——如让用户改用手抄/粘贴一份 10 篇子样本，或隔周重存主页看指标漂移 | AI | 结论不变或变化可解释 |
-| 3 | **HTML 可视化**（用户明确指令后置，勿提前做）：占比条 + 账号库页面 + 数据图，模板见 `skills/account-research/references/output-html-template.md`，必须与 md 报告同源 | AI | 双输出数字零不一致 |
+| 3 | **HTML 可视化**（用户明确指令后置，勿提前做）：占比条 + 账号库页面 + 数据图，模板见 `account-research/skill/references/output-html-template.md`，必须与 md 报告同源 | AI | 双输出数字零不一致 |
 | 4 | **解析器 v1**（产品化第一个组件，overall-workflow.md 已定义边界）：只处理本地 HTML，禁访问平台域名 | AI | 对本次 account/ 存档跑通，产出与报告 1.2 节一致 |
 | 5 | v0.3 诊断模式（心脏 B 漏斗排除，依赖专业号后台导出——需求侧未验证，勿提前开发） | — | 有真实用户带后台数据求助再启动 |
 
@@ -49,4 +51,4 @@ push 代理态势是动态的：先 socket 探测 `127.0.0.1:7897`——开着 �
 
 - 提交信息：`<type>: <中文简述>`，type ∈ feat/fix/docs/chore/skill；每次实质修改 Skill 须往 `docs/lessons-learned.md` 追加一条
 - 契约入口 `AGENTS.md`；分发版 `tataCrayon/app-market-research`（单技能仓，同步方式 = 克隆后 `cp -r skills/app-market-research/. <clone>/`；注意 `../../docs/dual-mirror-review.md` 相对链接在单技能仓失效，待处理）
-- account-research 文件地图：`SKILL.md`（九步+红线+输出格式）/ `立项.md`（形态决策史）/ `references/`（metrics 字典、data-sourcing-playbook 采集协议、overall-workflow E2E、output-html-template）/ `examples/`（本 case 报告）/ `账号库台账.md`（只追加）
+- account-research 文件地图（**2026-10-22 重构后**，根目录 `account-research/`）：`README.md`（项目入口）/ `AGENTS.md`（项目契约）/ `skill/SKILL.md`（九步+红线+输出格式）/ `skill/立项.md`（形态决策史）/ `skill/references/`（metrics 字典、data-sourcing-playbook 采集协议、overall-workflow E2E、output-html-template）/ `skill/examples/`（本 case 报告）/ `skill/账号库台账.md`（只追加）/ `src/parser/`（解析器，待建）/ `web/`（副端占位）/ `tests/` `docs/` `data/`

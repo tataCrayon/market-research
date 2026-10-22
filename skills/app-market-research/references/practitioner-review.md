@@ -1,6 +1,6 @@
 # 从业者审视 · App/小程序实例化（Practitioner Review for App Research）
 
-> **本文件是通用协议 [`docs/dual-mirror-review.md`](../docs/dual-mirror-review.md) 在 App/小程序立项领域的八轴实例化。**
+> **本文件是通用协议 [`docs/dual-mirror-review.md`](../../../docs/dual-mirror-review.md) 在 App/小程序立项领域的八轴实例化。**
 > 通用轴、4 步循环、红线、判定标记一律见共享协议，**本文件只写 App 领域的专属提示与真实 kill 案例**，避免重复。
 >
 > **视角定位**：一个真把 App/小程序做上线、踩过应用商店拒审、扛过合规复查、见过独立开发散伙的**产品人 / 独立开发者**，
@@ -36,4 +36,4 @@
 app-market-research 产出的每份报告，提交前做**双镜自审**——
 1. 用 `grill-method` 验方法（流程是否守住、有没有更强走法）；
 2. 用本文件（落地镜）验 survivability（八轴盲区是否摊开）。
-两份都过，才算完整交付。详见 [`docs/dual-mirror-review.md`](../../docs/dual-mirror-review.md)。
+两份都过，才算完整交付。详见 [`docs/dual-mirror-review.md`](../../../docs/dual-mirror-review.md)。

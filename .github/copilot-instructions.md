@@ -1,6 +1,6 @@
 # Copilot instructions
 
-本仓库是**调研 Skill 合集**。仓库契约见根目录 [`AGENTS.md`](../../AGENTS.md)，本文件仅为索引。
+本仓库是**调研 Skill 合集 + 一个产品项目**（`account-research`，从 Skill 提升，方法论在其 `skill/` 子目录）。仓库契约见根目录 [`AGENTS.md`](../AGENTS.md)，本文件仅为索引。
 
 ## 你在本仓库工作时必须遵守
 
@@ -19,6 +19,7 @@ skills/<领域>-research/SKILL.md   Skill 入口
 skills/<领域>-research/references/  清单、字段表、检索模板
 skills/<领域>-research/examples/    真实产出样例（必须有）
 skills/_template/                新 Skill 空模板
+account-research/                产品项目（形态特例）：skill/ 方法论 + src/ 工程 + web/ 副端
 ```
 
 ## 常见任务

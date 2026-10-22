@@ -2,7 +2,7 @@
 
 > 调研对象：`account-research`（小红书对标账号拆解，仓库 v0.1.4）产品化——「人保存网页 HTML（约 2 分钟/账号）→ AI 全自动处理（解析 → 四层拆解 → 封闭判决 → 双镜）→ 报告交付」。
 > 方法论：app-market-research v1.1（6 步循环 + 双镜自审）。检索 12 次（预算 ≤15），其中 8 次投 PLATFORM 政策取证（≥1/3 达标）。
-> 上游输入：整体流程设计（references/overall-workflow.md）、方法拷问记录（docs/grill-overall-workflow-2026-10-21.md）、可行性调研（docs/feasibility-research-2026-10-21.md）。
+> 上游输入：整体流程设计（[`account-research/skill/references/overall-workflow.md`](../account-research/skill/references/overall-workflow.md)）、方法拷问记录（docs/grill-overall-workflow-2026-10-21.md）、可行性调研（docs/feasibility-research-2026-10-21.md）。
 
 ## 0. 端阵决策（GATE）
 

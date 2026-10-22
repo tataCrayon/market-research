@@ -1,6 +1,6 @@
 # 从业者审视：职业领域八轴实例化（落地镜）
 
-> **通用八轴原文见 [`docs/dual-mirror-review.md`](../../docs/dual-mirror-review.md)，本文不重复。**
+> **通用八轴原文见 [`docs/dual-mirror-review.md`](../../../docs/dual-mirror-review.md)，本文不重复。**
 > 本文只写：八轴在**职业 / 岗位调研**里的具体问法、真实 kill 案例、以及本领域的补充轴。
 >
 > **视角**：一个真的招过人、带过团队、见过转岗失败与岗位蒸发的**用人方 / 业务负责人 / 资深从业者**。
