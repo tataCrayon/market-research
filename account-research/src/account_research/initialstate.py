@@ -1,0 +1,236 @@
+"""从存档 HTML 里取出 __INITIAL_STATE__ 并判定页面类型 / 归属。
+
+三条实测坑（case-001 复盘 §2，写解析器前必读）：
+1. `__INITIAL_STATE__` 是 JS 字面量不是严格 JSON——`undefined` 值必须清洗成 `null`；
+2. 存档里混着采集者本人的会话数据（`user.userInfo` 是 viewer）——必须按目标 userId 归属校验；
+3. 文件名不是采集成功的证据，只有内容能（三份「详情页」实际都是主页）。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterator
+
+MARKER = "__INITIAL_STATE__"
+
+
+class ArchiveError(Exception):
+    """存档不可用。message 直接面向人，写清「哪一类坏 + 怎么修」。"""
+
+
+@dataclass(frozen=True)
+class Archive:
+    path: Path
+    kind: str
+    state: dict[str, Any]
+    title: str = ""
+    target_user_ids: tuple[str, ...] = ()
+    viewer_user_id: str = ""
+    note_items: tuple[dict[str, Any], ...] = field(default=())
+
+    @property
+    def usable(self) -> bool:
+        return self.kind == "profile"
+
+
+def _brace_match(text: str, start: int) -> str:
+    """从 start（一个 '{' 的位置）开始做括号配对，跳过字符串内的括号。"""
+    depth = 0
+    in_string = False
+    escaped = False
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:idx + 1]
+    raise ArchiveError("__INITIAL_STATE__ 大括号不闭合——存档可能被截断，请重新保存整页。")
+
+
+def extract_literal(html: str) -> str:
+    pos = html.find(MARKER)
+    if pos < 0:
+        raise ArchiveError(f"找不到 {MARKER}：这不是服务端渲染的页面存档（详情页是 CSR，请改用 Ctrl+A 复制文本通道）。")
+    brace = html.find("{", pos)
+    if brace < 0:
+        raise ArchiveError(f"{MARKER} 之后没有对象字面量——存档不完整。")
+    return _brace_match(html, brace)
+
+
+def clean_js_literals(literal: str) -> str:
+    """把字符串外的 JS 专有字面量换成 JSON 的 null。
+
+    逐字符走，不整串替换：正文里出现 `a:undefined` 这类文字时，整串替换会改坏内容。
+    """
+    tokens = {"undefined", "NaN"}
+    out: list[str] = []
+    idx = 0
+    in_string = False
+    escaped = False
+    length = len(literal)
+    while idx < length:
+        ch = literal[idx]
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            idx += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            idx += 1
+            continue
+        matched = next((t for t in tokens if literal.startswith(t, idx)), None)
+        if matched and _is_token_boundary(literal, idx, idx + len(matched)):
+            out.append("null")
+            idx += len(matched)
+            continue
+        out.append(ch)
+        idx += 1
+    return "".join(out)
+
+
+def _is_token_boundary(text: str, start: int, end: int) -> bool:
+    before = text[start - 1] if start > 0 else ""
+    after = text[end] if end < len(text) else ""
+    return not (before.isalnum() or before in "_$") and not (after.isalnum() or after in "_$")
+
+
+def parse_html(html: str) -> dict[str, Any]:
+    """HTML 文本 → `__INITIAL_STATE__` 对象。存档只读一次，避免大文件重复 IO。"""
+    literal = clean_js_literals(extract_literal(html))
+    try:
+        state = json.loads(literal)
+    except json.JSONDecodeError as exc:
+        raise ArchiveError(
+            f"__INITIAL_STATE__ 仍不是合法 JSON（{exc.msg} @ char {exc.pos}）：存档可能被其他脚本改写过。"
+        ) from exc
+    if not isinstance(state, dict):
+        raise ArchiveError("__INITIAL_STATE__ 顶层不是对象。")
+    return state
+
+
+def load_state(path: str | Path) -> dict[str, Any]:
+    file_path = Path(path)
+    if not file_path.is_file():
+        raise ArchiveError(f"文件不存在：{file_path}")
+    return parse_html(file_path.read_text(encoding="utf-8", errors="replace"))
+
+
+def flatten_note_items(state: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """user.notes 是「分页数组的数组」；空页是 []。拍平并保留原始顺序。"""
+    notes = (state.get("user") or {}).get("notes") or []
+    items: list[dict[str, Any]] = []
+    for page in notes:
+        if isinstance(page, list):
+            items.extend(item for item in page if isinstance(item, dict))
+        elif isinstance(page, dict):
+            items.append(page)
+    return tuple(items)
+
+
+def iter_note_cards(state: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    for item in flatten_note_items(state):
+        card = item.get("noteCard")
+        if isinstance(card, dict):
+            yield card
+
+
+def target_user_ids(state: dict[str, Any]) -> tuple[str, ...]:
+    """目标账号 owner id 的两个独立来源，取并集后再交叉校验。
+
+    来源一：noteQueries[].userId（页面发起笔记请求时带的 id）
+    来源二：noteCard.user.userId（每张卡片自带的作者 id）
+    两者不一致说明存档里混入了别人的笔记（搜索页误采就是这个形状）。
+    """
+    ids: set[str] = set()
+    for query in (state.get("user") or {}).get("noteQueries") or []:
+        uid = (query or {}).get("userId")
+        if uid:
+            ids.add(str(uid))
+    for card in iter_note_cards(state):
+        uid = (card.get("user") or {}).get("userId")
+        if uid:
+            ids.add(str(uid))
+    return tuple(sorted(ids))
+
+
+def viewer_user_id(state: dict[str, Any]) -> str:
+    return str(((state.get("user") or {}).get("userInfo") or {}).get("userId") or "")
+
+
+def extract_title(html: str) -> str:
+    match = re.search(r"<title[^>]*>(.*?)</title>", html, re.S | re.I)
+    return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
+
+
+def classify(state: dict[str, Any], title: str = "") -> str:
+    """按「证据强度」排序判别，不按文件名（文件名是假信号，见 case-001 §2 F1）。
+
+    判据来源（均来自真实存档实测）：
+    - 详情页：`note.noteDetailMap` 非空
+    - 主页：`user.userPageData.basicInfo.nickname` 非空——主页独有的 SSR 字段
+    - 搜索页：`<title>` 含「搜索」（小红书搜索页标题形如「XX - 小红书搜索」）
+    - 推荐流：`feed.feeds` 非空且作者多于一（主页的 feed 只可能是单一作者）
+    """
+    if (state.get("note") or {}).get("noteDetailMap"):
+        return "note_detail"
+    basic_info = (((state.get("user") or {}).get("userPageData") or {}).get("basicInfo") or {})
+    if str(basic_info.get("nickname") or "").strip():
+        return "profile"
+    if "搜索" in title:
+        return "search_page"
+    if (state.get("search") or {}).get("feeds") or (state.get("search") or {}).get("searchValue"):
+        return "search_page"
+    if (state.get("feed") or {}).get("feeds"):
+        return "home_feed"
+    if flatten_note_items(state):
+        return "profile"
+    return "empty_skeleton"
+
+
+REJECT_REASONS = {
+    "note_detail": "详情页：v1 不解析详情页 HTML（CSR 存下来是空壳），请改用 Ctrl+A 复制文本通道。",
+    "search_page": "搜索页：内容是他人笔记，不是目标账号主页（归属校验会把它们全部丢弃）。",
+    "home_feed": "推荐流 / 结果页：内容是他人笔记，不是某个账号的主页。",
+    "empty_skeleton": "空壳存档：noteDetailMap 为空且无笔记列表，页面没渲染出来。",
+    "unknown": "无法识别页面类型：既没有笔记列表，也没有详情或搜索结构。",
+}
+
+
+def open_archive(path: str | Path) -> Archive:
+    file_path = Path(path)
+    if not file_path.is_file():
+        raise ArchiveError(f"文件不存在：{file_path}")
+    html = file_path.read_text(encoding="utf-8", errors="replace")
+    state = parse_html(html)
+    title = extract_title(html)
+    return Archive(
+        path=file_path,
+        kind=classify(state, title),
+        state=state,
+        title=title,
+        target_user_ids=target_user_ids(state),
+        viewer_user_id=viewer_user_id(state),
+        note_items=flatten_note_items(state),
+    )
