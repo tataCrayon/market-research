@@ -15,7 +15,7 @@ from typing import Any, Sequence
 
 from . import schema, store
 from .initialstate import REJECT_REASONS, ArchiveError, iter_note_cards, open_archive
-from .parser import parse_account, parse_notes
+from .parser import parse_account, parse_blocks, parse_notes
 from .stats import summarize
 from .validate import validate_dir, validate_tables
 
@@ -76,6 +76,20 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--data", default=str(DEFAULT_DATA))
     add.add_argument("--ledger", default=str(DEFAULT_LEDGER))
     add.set_defaults(func=cmd_add)
+
+    record = sub.add_parser("record", help="详情页人工补数：按 note_id 补收藏/评论/分享/时长")
+    record.add_argument("--file", required=True, help="JSON：一个对象或对象数组")
+    record.add_argument("--on", default=today(), help="详情页采集日期")
+    record.add_argument("--data", default=str(DEFAULT_DATA))
+    record.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    record.set_defaults(func=cmd_record)
+
+    paste = sub.add_parser("parse-text", help="解析书签小工具产出的 ===AR-NOTE-v1=== 块")
+    paste.add_argument("--file", required=True)
+    paste.add_argument("--on", default=today())
+    paste.add_argument("--data", default=str(DEFAULT_DATA))
+    paste.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    paste.set_defaults(func=cmd_parse_text)
     return root
 
 
@@ -131,6 +145,82 @@ def cmd_parse(args: argparse.Namespace) -> int:
     return 0
 
 
+def _commit_rows(args: argparse.Namespace, table: str, rows: list[dict[str, Any]]) -> int:
+    """先校验候选状态、通过才落盘（append-only 表没有回滚）。"""
+    tables = {name: store.read_table(args.data, name) for name in schema.TABLE_COLUMNS}
+    fresh, skipped = store.preview_append(tables[table], table, rows)
+    candidate = dict(tables)
+    candidate[table] = tables[table] + fresh
+    issues = validate_tables(candidate, args.ledger)
+    errors = [issue for issue in issues if issue.level == "ERROR"]
+    if errors:
+        for issue in issues:
+            print(f"{'❌' if issue.level == 'ERROR' else '⚠️'} [{issue.code}] {issue.message}")
+        print(f"\n写入被拒：{len(errors)} 条 ERROR。**本次一行都没写**，修好再重跑。")
+        return 1
+    store.append_rows(args.data, table, fresh)
+    print(f"{table}：新增 {len(fresh)} 行 / 键重复跳过 {skipped} 行（校验先于落盘 ✅）")
+    return 0
+
+
+def _detail_rows(args: argparse.Namespace, updates: list[dict[str, Any]]) -> int:
+    """详情页通道共用逻辑：以已有主页行为底，只覆盖人工读到的字段。
+
+    为什么必须找到底行：详情页数字不能凭空造，也不能顺手改掉列表页的标题/时间——
+    对不上的行要么是 note_id 抄错，要么是账号混了，两种都该报错而不是猜。
+    """
+    notes = store.read_table(args.data, "notes")
+    latest = {str(row.get("note_id")): row for row in store.latest_per_note(notes)}
+    rows: list[dict[str, Any]] = []
+    unknown: list[str] = []
+    for item in updates:
+        note_id = str(item.get("note_id") or "").strip()
+        base = latest.get(note_id)
+        if base is None:
+            unknown.append(note_id or "(空)")
+            continue
+        row = dict(base)
+        for field in ("likes", "collects", "comments", "shares", "duration", "human_note"):
+            if str(item.get(field) or "").strip():
+                row[field] = item[field]
+        row.update({
+            "collected_on": args.on,
+            "source_kind": "复制文本",
+            "source_file": str(item.get("source_file") or ""),
+            "grade": "②",
+        })
+        rows.append(row)
+    if unknown:
+        print(f"❌ 这些 note_id 在 notes 表里找不到（先 parse 主页存档）：{unknown}")
+        if not rows:
+            return 1
+    return _commit_rows(args, "notes", rows)
+
+
+def cmd_record(args: argparse.Namespace) -> int:
+    payload = _load_json(Path(args.file))
+    items = payload if isinstance(payload, list) else [payload]
+    if not all(isinstance(item, dict) for item in items):
+        print("❌ JSON 必须是对象或对象数组。")
+        return 1
+    return _detail_rows(args, items)
+
+
+def cmd_parse_text(args: argparse.Namespace) -> int:
+    path = Path(args.file)
+    if not path.is_file():
+        print(f"❌ 找不到 {path}")
+        return 1
+    blocks, errors = parse_blocks(path.read_text(encoding="utf-8", errors="replace"))
+    for message in errors:
+        print(f"⚠️ {message}")
+    if not blocks:
+        print("没有解析到任何 ===AR-NOTE-v1=== 块——检查书签小工具的输出是否完整粘贴。")
+        return 1
+    print(f"识别到 {len(blocks)} 块")
+    return _detail_rows(args, blocks)
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     issues = validate_dir(args.data, args.ledger)
     errors = [issue for issue in issues if issue.level == "ERROR"]
@@ -179,21 +269,7 @@ def cmd_add(args: argparse.Namespace) -> int:
     if unknown:
         print(f"❌ {args.table} 没有这些列：{unknown}（列名见 schema.py，禁止自造字段）")
         return 1
-
-    tables = {name: store.read_table(args.data, name) for name in schema.TABLE_COLUMNS}
-    fresh, skipped = store.preview_append(tables[args.table], args.table, rows)
-    candidate = dict(tables)
-    candidate[args.table] = tables[args.table] + fresh
-    issues = validate_tables(candidate, args.ledger)
-    errors = [issue for issue in issues if issue.level == "ERROR"]
-    if errors:
-        for issue in issues:
-            print(f"{'❌' if issue.level == 'ERROR' else '⚠️'} [{issue.code}] {issue.message}")
-        print(f"\n写入被拒：{len(errors)} 条 ERROR。**本次一行都没写**，修好再重跑。")
-        return 1
-    store.append_rows(args.data, args.table, fresh)
-    print(f"{args.table}：新增 {len(fresh)} 行 / 键重复跳过 {skipped} 行（校验先于落盘 ✅）")
-    return 0
+    return _commit_rows(args, args.table, rows)
 
 
 def _load_json(path: Path) -> Any:

@@ -20,7 +20,7 @@
 | 表 | 粒度 | 谁写 | 关键约束 |
 |---|---|---|---|
 | `accounts` | 一账号一行 | CLI（parse） | 变动值必须带 `collected_on`；同账号多次采集追加新行，不改旧行 |
-| `notes` | 一篇笔记一行 | CLI（parse） | 唯一键 = 账号 + 笔记 + 采集日；列表页拿不到的藏/评/分享**留空**，不填 |
+| `notes` | 一篇笔记一行 | CLI（parse / record / parse-text） | 唯一键 = 账号 + 笔记 + 采集日 + **通道**（主页与详情页是两条独立观测，同一天也不互相覆盖）；列表页拿不到的藏/评/分享**留空**，不填 |
 | `fields` | 一指标一行 | CLI（seed） | 口径登记：可不可得 + 等级 + 用途；**不含任何基准数值** |
 | `findings` | 一条结论一行 | Agent（`ar add`） | 必带 grade + evidence_ref + applicability |
 | `playbook` | 一条可抄动作一行 | Agent（`ar add`） | `failure_condition` 必填，否则 V5 拒收 |
@@ -47,13 +47,23 @@
 ## 4. CLI（确定性部分，零平台请求）
 
 ```bash
-python account-research/ar.py probe    <存档...>          # 判页面类型与归属（3 秒级，先于一切解析）
-python account-research/ar.py parse    <存档...> --on 2026-10-22   # 主页存档 → accounts / notes
+python account-research/ar.py probe      <存档...>          # 判页面类型与归属（3 秒级，先于一切解析）
+python account-research/ar.py parse      <存档...> --on 2026-10-22   # 主页存档 → accounts / notes
+python account-research/ar.py record     --file detail.json --on 2026-10-22   # 详情页人工补数（藏/评/时长）
+python account-research/ar.py parse-text --file paste.txt --on 2026-10-22     # 书签小工具的结构化块
 python account-research/ar.py validate                     # V1–V8
-python account-research/ar.py stats    [--account <id>] [--k 3,5]  # 篇均/中位/形式/爆文率/⬜ 覆盖度
-python account-research/ar.py add      <表> --file rows.json       # 唯一写入口，写完立即校验
+python account-research/ar.py stats      [--account <id>] [--k 3,5]  # 篇均/中位/形式/爆文率/⬜ 覆盖度
+python account-research/ar.py add        <表> --file rows.json       # 唯一写入口，先校验后落盘
 python account-research/ar.py selftest                     # 对真实存档跑回归（无存档则 SKIP）
 ```
+
+**两条通道怎么合并**：`notes` 表里同一篇可能有两行（主页一行、详情一行）。读取时按
+**（采集日, 通道优先级）** 升序做**字段级合并**——详情页补上的藏/评/时长不会覆盖主页才有的
+标题与形式，空值也永不覆盖已有值。`stats` 用的就是合并后的视图。
+
+**详情页通道的两个入口**：`record`（JSON，手工填）与 `parse-text`（书签小工具
+[`../../tools/capture-bookmarklet.js`](../../tools/capture-bookmarklet.js) 产出的 `===AR-NOTE-v1===` 块）。
+两者都要求 `note_id` 已在 `notes` 表里——**详情数字不能凭空造，也不能顺手改掉列表页的标题/时间**。
 
 ## 5. 页面类型判别（为什么先 probe）
 

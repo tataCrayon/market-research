@@ -30,6 +30,9 @@ NOTE_COLUMNS = (
     "account_id", "note_id", "published_at", "title", "form",
     "likes", "collects", "comments", "shares", "pinned", "topic",
     "source_file", "source_kind", "collected_on", "grade",
+    # duration / human_note 由「详情页人工补数」写入（列表页拿不到）：
+    # 视频时长相较于视频本体，是拆解真正需要的字段（最小充分数据原则）
+    "duration", "human_note",
 )
 
 FIELD_COLUMNS = (
@@ -58,7 +61,8 @@ HYPOTHESIS_COLUMNS = (
 # 追加型表的唯一键：同键不重复写，异键只追加（对应「台账只追加」纪律）
 TABLE_KEYS = {
     "accounts": ("account_id", "collected_on"),
-    "notes": ("account_id", "note_id", "collected_on"),
+    # 主页与详情页是两条独立观测通道：同一天读到的数字不同时点，不能互相覆盖
+    "notes": ("account_id", "note_id", "collected_on", "source_kind"),
     "fields": ("metric",),
     "verdicts": ("account_id", "decided_on"),
     "findings": ("finding_id",),

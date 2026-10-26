@@ -98,14 +98,33 @@ def seed_fields(data_dir: str | Path, checked_on: str) -> int:
     return len(rows)
 
 
+# 同一 note 有多个观测时，字段级的覆盖优先级：详情页（复制文本/截图）比主页列表更完整
+SOURCE_RANK = {"公开页": 1, "复制文本": 2, "截图": 2, "第三方工具": 0}
+
+
 def latest_per_note(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """同一 note_id 多次采集时取最新 collected_on 的一行（漂移序列取末次）。"""
-    chosen: dict[str, dict[str, Any]] = {}
+    """每个 note 合成一行：按 (采集日, 通道优先级) 升序折叠，非空字段由后到的覆盖。
+
+    为什么是「合并」而不是「取最后一行」：主页存档给标题/时间/赞，详情页只补藏/评/时长。
+    若只取最后一行，补完详情反而会丢掉主页才有的字段（标题时间还在，但视频 3 篇的
+    形式分布会被空值覆盖）。字段级合并让两条通道各自贡献自己有的部分。
+    """
+    grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         note_id = str(row.get("note_id") or "")
-        if not note_id:
-            continue
-        current = chosen.get(note_id)
-        if current is None or str(row.get("collected_on") or "") >= str(current.get("collected_on") or ""):
-            chosen[note_id] = row
-    return list(chosen.values())
+        if note_id:
+            grouped.setdefault(note_id, []).append(row)
+    merged: list[dict[str, Any]] = []
+    for note_id, group in grouped.items():
+        ordered = sorted(
+            group,
+            key=lambda row: (str(row.get("collected_on") or ""), SOURCE_RANK.get(str(row.get("source_kind") or ""), 0)),
+        )
+        accumulator: dict[str, Any] = {}
+        for row in ordered:
+            for field, value in row.items():
+                if str(value or "").strip():
+                    accumulator[field] = value
+        accumulator["note_id"] = note_id
+        merged.append(accumulator)
+    return merged

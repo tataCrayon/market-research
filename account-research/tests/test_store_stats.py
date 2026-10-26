@@ -42,9 +42,28 @@ class TestAppendOnly(unittest.TestCase):
         self.assertEqual(added, 1)
         self.assertEqual(len(store.read_table(self.data, "notes")), 2)
 
-    def test_latest_per_note_picks_newest_collected_on(self):
-        rows = [note("n1", 100), note("n1", 130, collected_on="2026-10-23")]
-        self.assertEqual(store.latest_per_note(rows)[0]["likes"], 130)
+    def test_two_channels_same_day_both_kept(self):
+        """主页与详情页同一天是两次独立观测，不能被去重吃掉。"""
+        store.append_rows(self.data, "notes", [note("n1", 100)])
+        detail = note("n1", 100, collected_on="2026-10-22")
+        detail["source_kind"] = "复制文本"
+        detail["collects"] = 500
+        added, skipped = store.append_rows(self.data, "notes", [detail])
+        self.assertEqual((added, skipped), (1, 0))
+        merged = store.latest_per_note(store.read_table(self.data, "notes"))
+        self.assertEqual(merged[0]["likes"], "100")
+        self.assertEqual(merged[0]["collects"], "500")
+
+    def test_latest_per_note_merges_fields_by_channel_priority(self):
+        base = note("n1", 100)
+        base["title"] = "标题在主页才有"
+        detail = note("n1", 110, collected_on="2026-10-23")
+        detail.update({"source_kind": "复制文本", "title": "", "collects": 430, "duration": "00:14"})
+        merged = store.latest_per_note([base, detail])[0]
+        self.assertEqual(merged["likes"], 110)      # 后到覆盖
+        self.assertEqual(merged["title"], "标题在主页才有")  # 空值不覆盖
+        self.assertEqual(merged["collects"], 430)
+        self.assertEqual(merged["duration"], "00:14")
 
 
 class TestStats(unittest.TestCase):

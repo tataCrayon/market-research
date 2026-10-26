@@ -122,5 +122,56 @@ def parse_notes(archive: Archive, account_id: str, collected_on: str) -> tuple[l
             "source_kind": "公开页",
             "collected_on": collected_on,
             "grade": "②",
+            "duration": "",
+            "human_note": "",
         })
     return rows, dropped
+
+
+# ---- 详情页通道：书签小工具产出的结构化块（格式由我们自己定，不猜平台结构） ----
+
+BLOCK_START = "===AR-NOTE-v1==="
+BLOCK_END = "===END==="
+BLOCK_FIELDS = (
+    "note_id", "title", "published", "likes", "collects", "comments",
+    "shares", "duration", "human_note", "url", "raw_len", "candidates",
+)
+BLANK_MARKS = ("", "-", "⬜", "未取证", "null", "None")
+
+
+def _clean_value(raw: str) -> str:
+    text = raw.strip()
+    return "" if text in BLANK_MARKS else text
+
+
+def parse_blocks(text: str) -> tuple[list[dict[str, str]], list[str]]:
+    """解析粘贴文本里的 `===AR-NOTE-v1===` 块。
+
+    返回 (块列表, 报错列表)。宽松解析：未知键保留在 `_extra`，坏块单独报错、不静默丢弃。
+    """
+    blocks: list[dict[str, str]] = []
+    errors: list[str] = []
+    current: dict[str, str] | None = None
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if stripped == BLOCK_START:
+            if current is not None:
+                errors.append(f"第 {lineno} 行：上一个块没有 {BLOCK_END} 就开始了新块")
+            current = {}
+            continue
+        if stripped == BLOCK_END:
+            if current is None:
+                errors.append(f"第 {lineno} 行：多余的 {BLOCK_END}")
+            else:
+                blocks.append(current)
+                current = None
+            continue
+        if current is None:
+            continue
+        if ":" not in stripped:
+            continue
+        key, _, value = stripped.partition(":")
+        current[key.strip()] = _clean_value(value)
+    if current is not None:
+        errors.append(f"文件结束时仍有未闭合的块（缺 {BLOCK_END}）")
+    return blocks, errors
