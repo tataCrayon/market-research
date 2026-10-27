@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import schema, store
+from .board import render_board
 from .detail import extract_detail
 from .initialstate import REJECT_REASONS, ArchiveError, iter_note_cards, open_archive
 from .parser import parse_account, parse_blocks, parse_notes
@@ -418,10 +419,19 @@ def cmd_links(args: argparse.Namespace) -> int:
         target = Path(args.out)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
-        print(f"已写入 {target}（{len(pending)} 篇）")
+        board_path = target.with_suffix(".html")
+        board_path.write_text(render_board(pending, NOTE_URL, _account_label(args)), encoding="utf-8")
+        print(f"已写入 {target} 与看板 {board_path}（{len(pending)} 篇）")
+        print(f"打开看板：start {board_path}    或双击该文件")
         return 0
     print(text)
     return 0
+
+
+def _account_label(args: argparse.Namespace) -> str:
+    accounts = store.read_table(args.data, "accounts")
+    names = sorted({str(row.get("nickname") or "") for row in accounts} - {""})
+    return " / ".join(names)
 
 
 def _collect_candidates(paths: list[str]) -> tuple[list[Path], list[Path]]:
