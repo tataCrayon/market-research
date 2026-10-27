@@ -21,6 +21,7 @@ from .validate import validate_dir, validate_tables
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DATA = REPO_ROOT / "account-research" / "data"
+DEFAULT_INBOX = REPO_ROOT / "account" / "inbox"
 DEFAULT_LEDGER = REPO_ROOT / "account-research" / "skill" / "账号库台账.md"
 DEFAULT_ARCHIVE = REPO_ROOT / "account" / "数字生命卡兹克"
 DEFAULT_FIXTURE = REPO_ROOT / "account-research" / "tests" / "fixtures" / "expected_kazike_20261022.json"
@@ -90,6 +91,28 @@ def build_parser() -> argparse.ArgumentParser:
     paste.add_argument("--data", default=str(DEFAULT_DATA))
     paste.add_argument("--ledger", default=str(DEFAULT_LEDGER))
     paste.set_defaults(func=cmd_parse_text)
+
+    gaps = sub.add_parser("gaps", help="列出缺藏/评/分享的篇目，按该补的价值排序")
+    gaps.add_argument("--data", default=str(DEFAULT_DATA))
+    gaps.add_argument("--account", default="")
+    gaps.add_argument("--limit", type=int, default=0, help="只列前 N 篇（0=全部）")
+    gaps.set_defaults(func=cmd_gaps)
+
+    fill = sub.add_parser("fill", help="逐篇口播补数（交互式，一次提交）")
+    fill.add_argument("--data", default=str(DEFAULT_DATA))
+    fill.add_argument("--account", default="")
+    fill.add_argument("--limit", type=int, default=10)
+    fill.add_argument("--on", default=today())
+    fill.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    fill.set_defaults(func=cmd_fill)
+
+    ingest = sub.add_parser("ingest", help="采件箱：自动识别 HTML 与粘贴块，入库并归档")
+    ingest.add_argument("path", nargs="?", default=str(DEFAULT_INBOX))
+    ingest.add_argument("--on", default=today())
+    ingest.add_argument("--data", default=str(DEFAULT_DATA))
+    ingest.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    ingest.add_argument("--keep", action="store_true", help="归档但保留原文件副本（默认移动）")
+    ingest.set_defaults(func=cmd_ingest)
     return root
 
 
@@ -145,22 +168,34 @@ def cmd_parse(args: argparse.Namespace) -> int:
     return 0
 
 
-def _commit_rows(args: argparse.Namespace, table: str, rows: list[dict[str, Any]]) -> int:
-    """先校验候选状态、通过才落盘（append-only 表没有回滚）。"""
+def _commit_tables(args: argparse.Namespace, updates: dict[str, list[dict[str, Any]]]) -> int:
+    """先校验候选状态、通过才落盘（append-only 表没有回滚）。
+
+    支持一次提交多张表：采集收件箱可能同时产出账号行与笔记行，分两次写会留下
+    「账号进了、笔记被拒」的半截状态。
+    """
     tables = {name: store.read_table(args.data, name) for name in schema.TABLE_COLUMNS}
-    fresh, skipped = store.preview_append(tables[table], table, rows)
-    candidate = dict(tables)
-    candidate[table] = tables[table] + fresh
-    issues = validate_tables(candidate, args.ledger)
+    fresh_map: dict[str, list[dict[str, Any]]] = {}
+    for table, rows in updates.items():
+        fresh, _ = store.preview_append(tables[table], table, rows)
+        fresh_map[table] = fresh
+        tables[table] = tables[table] + fresh
+    issues = validate_tables(tables, args.ledger)
     errors = [issue for issue in issues if issue.level == "ERROR"]
     if errors:
         for issue in issues:
             print(f"{'❌' if issue.level == 'ERROR' else '⚠️'} [{issue.code}] {issue.message}")
         print(f"\n写入被拒：{len(errors)} 条 ERROR。**本次一行都没写**，修好再重跑。")
         return 1
-    store.append_rows(args.data, table, fresh)
-    print(f"{table}：新增 {len(fresh)} 行 / 键重复跳过 {skipped} 行（校验先于落盘 ✅）")
+    for table, fresh in fresh_map.items():
+        if fresh:
+            store.append_rows(args.data, table, fresh)
+            print(f"{table}：新增 {len(fresh)} 行（校验先于落盘 ✅）")
     return 0
+
+
+def _commit_rows(args: argparse.Namespace, table: str, rows: list[dict[str, Any]]) -> int:
+    return _commit_tables(args, {table: rows})
 
 
 def _detail_rows(args: argparse.Namespace, updates: list[dict[str, Any]]) -> int:
@@ -207,11 +242,15 @@ def cmd_record(args: argparse.Namespace) -> int:
 
 
 def cmd_parse_text(args: argparse.Namespace) -> int:
-    path = Path(args.file)
-    if not path.is_file():
-        print(f"❌ 找不到 {path}")
-        return 1
-    blocks, errors = parse_blocks(path.read_text(encoding="utf-8", errors="replace"))
+    if args.file == "-":
+        text = sys.stdin.read()
+    else:
+        path = Path(args.file)
+        if not path.is_file():
+            print(f"❌ 找不到 {path}")
+            return 1
+        text = path.read_text(encoding="utf-8", errors="replace")
+    blocks, errors = parse_blocks(text)
     for message in errors:
         print(f"⚠️ {message}")
     if not blocks:
@@ -219,6 +258,157 @@ def cmd_parse_text(args: argparse.Namespace) -> int:
         return 1
     print(f"识别到 {len(blocks)} 块")
     return _detail_rows(args, blocks)
+
+
+def _merged_notes(args: argparse.Namespace) -> list[dict[str, Any]]:
+    notes = store.read_table(args.data, "notes")
+    if args.account:
+        notes = [row for row in notes if str(row.get("account_id")) == args.account]
+    return store.latest_per_note(notes)
+
+
+def _missing_fields(row: dict[str, Any], include_shares: bool = False) -> list[str]:
+    """缺口只算「藏 / 评」。
+
+    分享数在多数笔记页根本拿不到（报告里三篇深拆的分享全 ⬜）。把它算进缺口，
+    清单会永远清不完——**永远清不完的清单等于没有清单**。
+    """
+    labels = {"collects": "藏", "comments": "评"}
+    if include_shares:
+        labels["shares"] = "分享"
+    return [label for col, label in labels.items() if not str(row.get(col) or "").strip()]
+
+
+def cmd_gaps(args: argparse.Namespace) -> int:
+    """告诉人「该去补哪几篇」——采集效率的一半在减少盲目点击。"""
+    rows = [row for row in _merged_notes(args) if _missing_fields(row)]
+    rows.sort(key=lambda row: -int(str(row.get("likes") or 0)))
+    if not rows:
+        print("没有缺口：所有篇目的藏/评/分享都已入库。")
+        return 0
+    shown = rows[: args.limit] if args.limit else rows
+    print(f"缺藏/评的篇目：{len(rows)} 篇（按点赞降序，先补最能解释量级的）")
+    print("注：分享数多数拿不到，不计入缺口；要一并补用 `ar fill` 时多打一个数字即可。\n")
+    for index, row in enumerate(shown, start=1):
+        print(f"{index:>2}. 赞 {str(row.get('likes') or '?'):>6} | 缺 {'/'.join(_missing_fields(row))}"
+              f" | {row.get('published_at') or '?'} | {row.get('title') or '(无标题)'}")
+        print(f"    note_id={row.get('note_id')}")
+    if len(shown) < len(rows):
+        print(f"\n（共 {len(rows)} 篇，用 --limit 0 看全部）")
+    print("\n下一步：`ar fill` 逐篇口播补数，或点书签复制块后用 `ar parse-text`。")
+    return 0
+
+
+def cmd_fill(args: argparse.Namespace) -> int:
+    """交互式补数：一次只问一篇，回车跳过，q 结束，最后一次性提交。
+
+    为什么做成口播而不是自动抓：交互栏 DOM 没有稳定标签，写死选择器会把平台改版
+    变成静默错数据。人眼读三个数字是 3 秒的事，错了能立刻发现。
+    """
+    rows = [row for row in _merged_notes(args) if _missing_fields(row)]
+    rows.sort(key=lambda row: -int(str(row.get("likes") or 0)))
+    targets = rows[: args.limit] if args.limit else rows
+    if not targets:
+        print("没有缺口，无需补数。")
+        return 0
+    print(f"待补 {len(targets)} 篇。输入格式：`藏 评 [分享]`（空格分隔）；回车=跳过，q=结束，"
+          f"数字不确定就按回车——**留空比填错好**。\n")
+    updates: list[dict[str, Any]] = []
+    for index, row in enumerate(targets, start=1):
+        print(f"[{index}/{len(targets)}] 赞 {row.get('likes') or '?'} | {row.get('title') or '(无标题)'}")
+        raw = input("    藏 评 分享 > ").strip()
+        if raw.lower() == "q":
+            break
+        if not raw:
+            continue
+        parts = [part for part in raw.replace(",", " ").replace("/", " ").split() if part]
+        update: dict[str, Any] = {"note_id": row.get("note_id")}
+        for column, value in zip(("collects", "comments", "shares"), parts):
+            if value not in ("-", "⬜"):
+                update[column] = value
+        updates.append(update)
+    if not updates:
+        print("\n没有要写入的行（全部跳过）。")
+        return 0
+    print(f"\n准备写入 {len(updates)} 篇…")
+    return _detail_rows(args, updates)
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    """采件箱：把「存下来的 HTML」和「书签复制出的块」一起丢进来，一条命令入库。
+
+    人的动作压到三步：存/点 → 丢进同一个文件夹 → 跑一条命令。
+    文件类型靠内容判别，不靠扩展名（文件名是假信号，见 case-001 §2 F1）。
+    """
+    root = Path(args.path)
+    if not root.is_dir():
+        root.mkdir(parents=True, exist_ok=True)
+        print(f"采件箱目录已创建：{root}\n把存档 HTML / 书签复制的 txt 丢进来，再跑一次。")
+        return 0
+    candidates = sorted(p for p in root.iterdir() if p.is_file() and p.suffix.lower() in (".html", ".htm", ".txt", ".md"))
+    if not candidates:
+        print(f"采件箱是空的：{root}")
+        return 0
+
+    account_rows: list[dict[str, Any]] = []
+    note_rows: list[dict[str, Any]] = []
+    block_items: list[dict[str, Any]] = []
+    handled: list[Path] = []
+    skipped: list[tuple[Path, str]] = []
+
+    for path in candidates:
+        if path.suffix.lower() in (".html", ".htm"):
+            try:
+                archive = open_archive(path)
+            except ArchiveError as exc:
+                skipped.append((path, str(exc)))
+                continue
+            if not archive.usable:
+                skipped.append((path, REJECT_REASONS.get(archive.kind, "无法识别")))
+                continue
+            account = parse_account(archive, args.on)
+            notes, dropped = parse_notes(archive, account["account_id"], args.on)
+            account_rows.append(account)
+            note_rows.extend(notes)
+            handled.append(path)
+            extra = f"（丢弃非目标作者 {len(dropped)} 篇）" if dropped else ""
+            print(f"✅ {path.name}：{account['nickname']} 笔记 {len(notes)} 篇{extra}")
+        else:
+            blocks, errors = parse_blocks(path.read_text(encoding="utf-8", errors="replace"))
+            for message in errors:
+                print(f"⚠️ {path.name}：{message}")
+            if not blocks:
+                skipped.append((path, "没有 ===AR-NOTE-v1=== 块"))
+                continue
+            block_items.extend(blocks)
+            handled.append(path)
+            print(f"✅ {path.name}：识别到 {len(blocks)} 个笔记块")
+
+    if account_rows or note_rows:
+        code = _commit_tables(args, {"accounts": account_rows, "notes": note_rows})
+        if code:
+            return code
+    if block_items:
+        code = _detail_rows(args, block_items)
+        if code:
+            return code
+    for path, reason in skipped:
+        print(f"⏭  {path.name}：{reason}")
+    if not handled:
+        print("\n没有可入库的文件。")
+        return 1
+
+    archive_dir = root / "processed" / args.on
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    for path in handled:
+        target = archive_dir / path.name
+        if args.keep:
+            target.write_bytes(path.read_bytes())
+            path.unlink()
+        else:
+            path.replace(target)
+    print(f"\n已归档 {len(handled)} 个文件 → {archive_dir}")
+    return 0
 
 
 def cmd_validate(args: argparse.Namespace) -> int:

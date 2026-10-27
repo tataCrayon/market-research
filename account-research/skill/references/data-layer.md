@@ -48,6 +48,9 @@
 
 ```bash
 python account-research/ar.py probe      <存档...>          # 判页面类型与归属（3 秒级，先于一切解析）
+python account-research/ar.py ingest     [目录]             # 采件箱：自动判别 HTML/粘贴块 → 入库 → 归档
+python account-research/ar.py gaps       [--limit N]        # 缺口清单（缺藏/评，按点赞降序）
+python account-research/ar.py fill       [--limit N]        # 逐篇口播补数（交互式，一次提交）
 python account-research/ar.py parse      <存档...> --on 2026-10-22   # 主页存档 → accounts / notes
 python account-research/ar.py record     --file detail.json --on 2026-10-22   # 详情页人工补数（藏/评/时长）
 python account-research/ar.py parse-text --file paste.txt --on 2026-10-22     # 书签小工具的结构化块
@@ -56,6 +59,8 @@ python account-research/ar.py stats      [--account <id>] [--k 3,5]  # 篇均/�
 python account-research/ar.py add        <表> --file rows.json       # 唯一写入口，先校验后落盘
 python account-research/ar.py selftest                     # 对真实存档跑回归（无存档则 SKIP）
 ```
+
+**采集日常只需要三条**：`ar gaps`（补哪几篇）→ 采 → `ar ingest`（丢进 `account/inbox/` 一键入库）。
 
 **两条通道怎么合并**：`notes` 表里同一篇可能有两行（主页一行、详情一行）。读取时按
 **（采集日, 通道优先级）** 升序做**字段级合并**——详情页补上的藏/评/时长不会覆盖主页才有的

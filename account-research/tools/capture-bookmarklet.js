@@ -38,12 +38,16 @@
     document.title.replace(/ - 小红书.*$/, "")
   );
 
-  // 互动栏数字：找「赞/收藏/评论」附近的数字，作为候选交给人确认。
-  const bar = clean((document.querySelector(".interact-container") || scope).innerText || "");
-  const candidates = (bar.match(/\d+(?:\.\d+)?\s*[万wW]?/g) || []).slice(0, 8).join(" | ");
+  // 互动栏原文：**不做数字解析**（选择器一改就变成静默错数据）。
+  // 把带标签的原文交给人一眼读数，比任何正则都可靠；candidates 只是抄写时的提示。
+  const barText = clean(
+    (document.querySelector(".interact-container") || scope).innerText || ""
+  ).slice(0, 120);
+  const candidates = (barText.match(/\d+(?:\.\d+)?\s*[万wW]?/g) || []).slice(0, 8).join(" | ");
 
   const duration = clean((scope.querySelector("video") ? (scope.querySelector("video").duration || "") : "") || "");
   const mmss = text.match(/\b(\d{1,2}:\d{2})\b/);
+  const bodyHead = clean(text).slice(0, 40);
 
   const block = [
     BLOCK_START,
@@ -58,12 +62,18 @@
     "human_note: ",
     "url: " + url.split("?")[0],
     "raw_len: " + text.length,
+    "body_head: " + bodyHead,
+    "bar_text: " + barText,
     "candidates: " + candidates,
     BLOCK_END,
   ].join("\n");
 
   navigator.clipboard.writeText(block).then(
-    () => alert("已复制 " + (noteId ? "note_id=" + noteId : "（没认出 note_id，请手填）") + "\n赞/藏/评请按页面数字填，候选值：" + (candidates || "无")),
+    () => alert(
+      (noteId ? "已复制 note_id=" + noteId : "没认出 note_id，请手填") +
+      "\n\n互动栏原文：\n" + (barText || "（没找到，请直接看页面）") +
+      "\n\n按原文填 赞/藏/评——别用候选值猜。"
+    ),
     () => prompt("剪贴板不可用，请手动复制：", block)
   );
 })();

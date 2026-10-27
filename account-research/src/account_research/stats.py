@@ -60,12 +60,15 @@ def _like_stats(values: list[int]) -> LikeStats:
 
 
 def summarize(notes: list[dict[str, Any]], account_id: str = "", k_values: tuple[int, ...] = (3, 5)) -> SampleStats:
-    """置顶篇单列不进样本统计（字典 §6：置顶是账号门面，不是常规产能）。"""
+    """置顶篇单列不进样本统计（字典 §6：置顶是账号门面，不是常规产能）。
+
+    `excluded` 只统计**缺来源**的行（没有采集日 = 五件套不成立）。同一篇的主页行 +
+    详情行是两条观测，合并成一篇后**不算被排除**——早期版本把通道重复行计成
+    excluded，会报出「因缺来源被排除 3 行」这种错口径。
+    """
     scoped = [row for row in notes if not account_id or str(row.get("account_id")) == account_id]
-    usable = [
-        row for row in latest_per_note(scoped)
-        if str(row.get("collected_on") or "").strip() and _int_or_none(row.get("likes")) is not None
-    ]
+    valid = [row for row in scoped if str(row.get("collected_on") or "").strip()]
+    usable = [row for row in latest_per_note(valid) if _int_or_none(row.get("likes")) is not None]
     pinned = [row for row in usable if str(row.get("pinned") or "0") in ("1", "true", "True")]
     sample = [row for row in usable if row not in pinned]
     likes = [_int_or_none(row.get("likes")) or 0 for row in sample]
@@ -75,7 +78,7 @@ def summarize(notes: list[dict[str, Any]], account_id: str = "", k_values: tuple
         n_pinned=len(pinned),
         n_sample=len(sample),
         likes=_like_stats(likes),
-        excluded=len(scoped) - len(usable),
+        excluded=len(scoped) - len(valid),
     )
     result.forms = _form_breakdown(sample)
     result.burst = _burst_rates(likes, result.likes.median, k_values)
