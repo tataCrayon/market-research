@@ -27,6 +27,8 @@ class Archive:
     kind: str
     state: dict[str, Any]
     title: str = ""
+    og_url: str = ""
+    html: str = ""
     target_user_ids: tuple[str, ...] = ()
     viewer_user_id: str = ""
     note_items: tuple[dict[str, Any], ...] = field(default=())
@@ -184,15 +186,20 @@ def extract_title(html: str) -> str:
     return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
 
 
-def classify(state: dict[str, Any], title: str = "") -> str:
+def classify(state: dict[str, Any], title: str = "", og_url_value: str = "") -> str:
     """按「证据强度」排序判别，不按文件名（文件名是假信号，见 case-001 §2 F1）。
 
     判据来源（均来自真实存档实测）：
-    - 详情页：`note.noteDetailMap` 非空
-    - 主页：`user.userPageData.basicInfo.nickname` 非空——主页独有的 SSR 字段
-    - 搜索页：`<title>` 含「搜索」（小红书搜索页标题形如「XX - 小红书搜索」）
-    - 推荐流：`feed.feeds` 非空且作者多于一（主页的 feed 只可能是单一作者）
+    - 详情页：`og:url` 指向 `/explore/<id>` **或** `note.noteDetailMap` 非空。
+      ⚠️ 2026-10-27 实测纠正：`noteDetailMap` 为空**不代表**是主页——整页加载 /explore/<id>
+      时服务端会回正文与互动栏，而 `noteDetailMap` 仍可能是空的（脚本未跑）。
+      所以 og:url 是更强、更早的判据，必须排在前面。
+    - 主页：`user.userPageData.basicInfo.nickname` 非空
+    - 搜索页：`<title>` 含「搜索」
+    - 推荐流：`feed.feeds` 非空
     """
+    if og_url_value and re.search(r"/(?:explore|discovery/item)/[0-9a-f]{24}", og_url_value, re.I):
+        return "note_detail"
     if (state.get("note") or {}).get("noteDetailMap"):
         return "note_detail"
     basic_info = (((state.get("user") or {}).get("userPageData") or {}).get("basicInfo") or {})
@@ -210,11 +217,13 @@ def classify(state: dict[str, Any], title: str = "") -> str:
 
 
 REJECT_REASONS = {
-    "note_detail": "详情页：v1 不解析详情页 HTML（CSR 存下来是空壳），请改用 Ctrl+A 复制文本通道。",
+    "note_detail": "详情页：需走详情通道（`ar parse-detail` 或 Ctrl+A 复制），不是主页数据。",
     "search_page": "搜索页：内容是他人笔记，不是目标账号主页（归属校验会把它们全部丢弃）。",
     "home_feed": "推荐流 / 结果页：内容是他人笔记，不是某个账号的主页。",
     "empty_skeleton": "空壳存档：noteDetailMap 为空且无笔记列表，页面没渲染出来。",
     "unknown": "无法识别页面类型：既没有笔记列表，也没有详情或搜索结构。",
+    "profile_saved_as_detail": "这份看起来是从主页点开弹层后存的——og:url 仍指向主页。"
+                               "请在新标签页整页打开该笔记后再保存（见 docs/详情页采集-结论.md）。",
 }
 
 
@@ -223,13 +232,24 @@ def open_archive(path: str | Path) -> Archive:
     if not file_path.is_file():
         raise ArchiveError(f"文件不存在：{file_path}")
     html = file_path.read_text(encoding="utf-8", errors="replace")
-    state = parse_html(html)
     title = extract_title(html)
+    match = re.search(r'og:url[^>]*content="([^"]+)"', html)
+    og = match.group(1) if match else ""
+    try:
+        state = parse_html(html)
+    except ArchiveError:
+        # 详情页不一定非要 __INITIAL_STATE__：详情字段全在渲染后的 DOM 里。
+        # 只要 og:url 指向 /explore/<id>，就按详情页处理（主页没有这条 og:url）。
+        if og and re.search(r"/(?:explore|discovery/item)/[0-9a-f]{24}", og, re.I):
+            return Archive(path=file_path, kind="note_detail", state={}, title=title, og_url=og, html=html)
+        raise
     return Archive(
         path=file_path,
-        kind=classify(state, title),
+        kind=classify(state, title, og),
         state=state,
         title=title,
+        og_url=og,
+        html=html,
         target_user_ids=target_user_ids(state),
         viewer_user_id=viewer_user_id(state),
         note_items=flatten_note_items(state),

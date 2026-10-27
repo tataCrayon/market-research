@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import schema, store
+from .detail import extract_detail
 from .initialstate import REJECT_REASONS, ArchiveError, iter_note_cards, open_archive
 from .parser import parse_account, parse_blocks, parse_notes
 from .stats import summarize
@@ -91,6 +92,14 @@ def build_parser() -> argparse.ArgumentParser:
     paste.add_argument("--data", default=str(DEFAULT_DATA))
     paste.add_argument("--ledger", default=str(DEFAULT_LEDGER))
     paste.set_defaults(func=cmd_parse_text)
+
+    detail = sub.add_parser("parse-detail", help="详情页 HTML → 补赞/藏/评/时长，并把正文归档")
+    detail.add_argument("files", nargs="+")
+    detail.add_argument("--on", default=today())
+    detail.add_argument("--account", default="", help="账号 id（详情页读到主页未覆盖的新笔记时必填）")
+    detail.add_argument("--data", default=str(DEFAULT_DATA))
+    detail.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    detail.set_defaults(func=cmd_parse_detail)
 
     gaps = sub.add_parser("gaps", help="列出缺藏/评/分享的篇目，按该补的价值排序")
     gaps.add_argument("--data", default=str(DEFAULT_DATA))
@@ -198,22 +207,34 @@ def _commit_rows(args: argparse.Namespace, table: str, rows: list[dict[str, Any]
     return _commit_tables(args, {table: rows})
 
 
-def _detail_rows(args: argparse.Namespace, updates: list[dict[str, Any]]) -> int:
+def _detail_rows(args: argparse.Namespace, updates: list[dict[str, Any]], allow_new: bool = False) -> int:
     """详情页通道共用逻辑：以已有主页行为底，只覆盖人工读到的字段。
 
     为什么必须找到底行：详情页数字不能凭空造，也不能顺手改掉列表页的标题/时间——
     对不上的行要么是 note_id 抄错，要么是账号混了，两种都该报错而不是猜。
+
+    `allow_new`：详情页可能读到主页存档未覆盖的新笔记。此时允许新建行，
+    但**发布时间留空**（详情页只给「3天前」这种相对值，推算日期 = 编数据）。
     """
     notes = store.read_table(args.data, "notes")
     latest = {str(row.get("note_id")): row for row in store.latest_per_note(notes)}
+    accounts = {str(row.get("account_id")) for row in store.read_table(args.data, "accounts")}
+    default_account = str(getattr(args, "account", "") or (next(iter(accounts)) if len(accounts) == 1 else ""))
     rows: list[dict[str, Any]] = []
     unknown: list[str] = []
     for item in updates:
         note_id = str(item.get("note_id") or "").strip()
         base = latest.get(note_id)
         if base is None:
-            unknown.append(note_id or "(空)")
-            continue
+            if not (allow_new and default_account):
+                unknown.append(note_id or "(空)")
+                continue
+            base = {column: "" for column in schema.NOTE_COLUMNS}
+            base.update({
+                "account_id": default_account, "note_id": note_id, "pinned": "0",
+                "title": str(item.get("title") or ""), "form": str(item.get("form") or ""),
+                "human_note": "来源=详情页 HTML；发布时间未取证（页面只显示相对时间）",
+            })
         row = dict(base)
         for field in ("likes", "collects", "comments", "shares", "duration", "human_note"):
             if str(item.get(field) or "").strip():
@@ -364,6 +385,15 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 skipped.append((path, str(exc)))
                 continue
             if not archive.usable:
+                if archive.kind == "note_detail":
+                    fields = extract_detail(archive.html)
+                    if fields.note_id:
+                        block_items.append(fields.as_row_updates())
+                        handled.append(path)
+                        print(f"✅ {path.name}：详情页 note_id={fields.note_id}"
+                              f"（赞 {fields.likes or '⬜'} / 藏 {fields.collects or '⬜'} / 评 {fields.comments or '⬜'}）")
+                        _archive_body(fields)
+                        continue
                 skipped.append((path, REJECT_REASONS.get(archive.kind, "无法识别")))
                 continue
             account = parse_account(archive, args.on)
@@ -409,6 +439,53 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             path.replace(target)
     print(f"\n已归档 {len(handled)} 个文件 → {archive_dir}")
     return 0
+
+
+def cmd_parse_detail(args: argparse.Namespace) -> int:
+    """详情页 HTML → 笔记级字段。前提：og:url 指向 /explore/<id>（否则是主页快照）。"""
+    updates: list[dict[str, Any]] = []
+    for raw in args.files:
+        path = Path(raw)
+        if not path.is_file():
+            print(f"❌ 找不到 {path}")
+            continue
+        html = path.read_text(encoding="utf-8", errors="replace")
+        fields = extract_detail(html)
+        if not fields.note_id:
+            if '<h1' in html and 'detail-title' in html:
+                print(f"⏭  {path.name}：{REJECT_REASONS['profile_saved_as_detail']}")
+            else:
+                print(f"⏭  {path.name}：og:url 里没有 /explore/<id> —— 这不是整页加载的详情页"
+                      f"（多半是从主页点开弹层后存的，存下来的是主页）。")
+            continue
+        print(f"✅ {path.name}")
+        print(f"   note_id={fields.note_id} | 赞 {fields.likes or '⬜'} / 藏 {fields.collects or '⬜'}"
+              f" / 评 {fields.comments or '⬜'} | 形式 {fields.form or '?'}"
+              + (f" | 时长 {fields.duration}" if fields.duration else ""))
+        print(f"   标题：{fields.title or '⬜'}")
+        print(f"   标签：{' '.join(fields.tags) or '⬜'}")
+        print(f"   正文前 60 字：{fields.body[:60] or '⬜'}")
+        if fields.missing:
+            print(f"   ⚠️ 未取到：{fields.missing}（保持 ⬜，不估算）")
+        archived = _archive_body(fields)
+        if archived:
+            print(f"   正文已归档：{archived}")
+        updates.append(fields.as_row_updates())
+    if not updates:
+        return 1
+    return _detail_rows(args, updates, allow_new=True)
+
+
+def _archive_body(fields: Any) -> str:
+    """正文落本地文件（长文本不进 CSV）。目录在 account/ 下，随存档一起被 gitignore。"""
+    if not fields.note_id or not fields.body:
+        return ""
+    target_dir = REPO_ROOT / "account" / "notes-text"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{fields.note_id}.txt"
+    header = f"# {fields.title}\n# 标签：{' '.join(fields.tags)}\n# 赞/藏/评：{fields.likes}/{fields.collects}/{fields.comments}\n\n"
+    target.write_text(header + fields.body, encoding="utf-8")
+    return str(target.relative_to(REPO_ROOT))
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
