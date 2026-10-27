@@ -123,12 +123,16 @@ def build_parser() -> argparse.ArgumentParser:
     links.set_defaults(func=cmd_links)
 
     ingest = sub.add_parser("ingest", help="采件箱：自动识别 HTML 与粘贴块，入库并归档")
-    ingest.add_argument("path", nargs="?", default=str(DEFAULT_INBOX))
+    ingest.add_argument("path", nargs="*", default=[], help="目录或单个文件；省略=account/inbox")
     ingest.add_argument("--on", default=today())
     ingest.add_argument("--data", default=str(DEFAULT_DATA))
     ingest.add_argument("--ledger", default=str(DEFAULT_LEDGER))
-    ingest.add_argument("--keep", action="store_true", help="归档但保留原文件副本（默认移动）")
     ingest.set_defaults(func=cmd_ingest)
+
+    status = sub.add_parser("status", help="进度总览：采了多少、还差多少、卡在哪")
+    status.add_argument("--data", default=str(DEFAULT_DATA))
+    status.add_argument("--account", default="")
+    status.set_defaults(func=cmd_status)
     return root
 
 
@@ -420,20 +424,38 @@ def cmd_links(args: argparse.Namespace) -> int:
     return 0
 
 
+def _collect_candidates(paths: list[str]) -> tuple[list[Path], list[Path]]:
+    """展开输入：目录取里面待处理的文件，文件直接用。返回 (候选文件, 新建的目录)。"""
+    candidates: list[Path] = []
+    created: list[Path] = []
+    for raw in paths:
+        path = Path(raw)
+        if path.is_dir():
+            candidates.extend(
+                sorted(p for p in path.iterdir() if p.is_file() and p.suffix.lower() in (".html", ".htm", ".txt", ".md"))
+            )
+        elif path.is_file():
+            candidates.append(path)
+        else:
+            path.mkdir(parents=True, exist_ok=True)
+            created.append(path)
+    return candidates, created
+
+
 def cmd_ingest(args: argparse.Namespace) -> int:
     """采件箱：把「存下来的 HTML」和「书签复制出的块」一起丢进来，一条命令入库。
 
     人的动作压到三步：存/点 → 丢进同一个文件夹 → 跑一条命令。
     文件类型靠内容判别，不靠扩展名（文件名是假信号，见 case-001 §2 F1）。
+    也可以直接给单文件（`ar ingest 某篇.html`），不必凑齐一批。
     """
-    root = Path(args.path)
-    if not root.is_dir():
-        root.mkdir(parents=True, exist_ok=True)
-        print(f"采件箱目录已创建：{root}\n把存档 HTML / 书签复制的 txt 丢进来，再跑一次。")
-        return 0
-    candidates = sorted(p for p in root.iterdir() if p.is_file() and p.suffix.lower() in (".html", ".htm", ".txt", ".md"))
+    roots = [Path(p) for p in (args.path or [str(DEFAULT_INBOX)])]
+    candidates, created = _collect_candidates([str(p) for p in roots])
+    for path in created:
+        print(f"采件箱目录已创建：{path}\n把存档 HTML / 书签复制的 txt 丢进来，再跑一次。")
     if not candidates:
-        print(f"采件箱是空的：{root}")
+        if not created:
+            print("采件箱是空的：%s" % "、".join(str(p) for p in roots))
         return 0
 
     account_rows: list[dict[str, Any]] = []
@@ -493,17 +515,19 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         print("\n没有可入库的文件。")
         return 1
 
-    archive_dir = root / "processed" / args.on
+    archive_dir = (roots[0] if roots[0].is_dir() else roots[0].parent) / "processed" / args.on
     archive_dir.mkdir(parents=True, exist_ok=True)
     for path in handled:
         target = archive_dir / path.name
-        if args.keep:
-            target.write_bytes(path.read_bytes())
-            path.unlink()
-        else:
-            path.replace(target)
+        if target.exists():
+            target = archive_dir / f"{path.stem}-{_stamp()}{path.suffix}"
+        path.replace(target)
     print(f"\n已归档 {len(handled)} 个文件 → {archive_dir}")
     return 0
+
+
+def _stamp() -> str:
+    return datetime.now().strftime("%H%M%S")
 
 
 def cmd_parse_detail(args: argparse.Namespace) -> int:
@@ -551,6 +575,43 @@ def _archive_body(fields: Any) -> str:
     header = f"# {fields.title}\n# 标签：{' '.join(fields.tags)}\n# 赞/藏/评：{fields.likes}/{fields.collects}/{fields.comments}\n\n"
     target.write_text(header + fields.body, encoding="utf-8")
     return str(target.relative_to(REPO_ROOT))
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """进度总览：这一步该干什么，不用翻文档。
+
+    采集是长跑活动，最贵的不是单次操作，是**每次坐下都要重新搞清楚进度**。
+    """
+    accounts = store.read_table(args.data, "accounts")
+    notes = store.read_table(args.data, "notes")
+    if not accounts:
+        print("库里还没有账号。")
+        print("下一步：把主页存档丢进 account/inbox/ → `ar ingest`")
+        return 0
+    merged = _merged_notes(args)
+    text_dir = REPO_ROOT / "account" / TEXT_DIR
+    with_text = sum(1 for row in merged if (text_dir / f"{row.get('note_id')}.txt").is_file())
+    missing = [row for row in merged if _missing_fields(row)]
+    print(f"账号 {len(accounts)} 个 | 笔记 {len(merged)} 篇（原始 {len(notes)} 行，含多渠道观测）")
+    print(f"有正文归档 {with_text} 篇 | 藏/评齐全 {len(merged) - len(missing)} 篇 | 待补 {len(missing)} 篇")
+    print()
+    inbox = DEFAULT_INBOX
+    pending_files = [p for p in inbox.iterdir() if p.is_file()] if inbox.is_dir() else []
+    print(f"采件箱 {inbox}：{'有 ' + str(len(pending_files)) + ' 个文件待入库' if pending_files else '空'}")
+    print()
+    issues = validate_dir(args.data, DEFAULT_LEDGER)
+    errors = [issue for issue in issues if issue.level == "ERROR"]
+    print(f"校验：{len(errors)} ERROR / {len(issues) - len(errors)} WARN"
+          + ("（有错误，先修再继续）" if errors else " ✅"))
+    print()
+    if pending_files:
+        print("下一步：`ar ingest` 把采件箱里的文件入库。")
+    elif missing:
+        print("下一步：`ar links --limit 5 --out account-research/data/todo-detail.md` 拿待采清单，"
+              "逐篇打开后 Ctrl+S，再 `ar ingest`。")
+    else:
+        print("下一步：数据齐了，可以跑拆解（`ar add verdicts` 等四张表）。")
+    return 0
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
