@@ -115,6 +115,13 @@ def build_parser() -> argparse.ArgumentParser:
     fill.add_argument("--ledger", default=str(DEFAULT_LEDGER))
     fill.set_defaults(func=cmd_fill)
 
+    links = sub.add_parser("links", help="生成待采集的详情页链接清单（点一个存一个）")
+    links.add_argument("--data", default=str(DEFAULT_DATA))
+    links.add_argument("--account", default="")
+    links.add_argument("--limit", type=int, default=0)
+    links.add_argument("--out", default="", help="写成 markdown 文件；默认只打印")
+    links.set_defaults(func=cmd_links)
+
     ingest = sub.add_parser("ingest", help="采件箱：自动识别 HTML 与粘贴块，入库并归档")
     ingest.add_argument("path", nargs="?", default=str(DEFAULT_INBOX))
     ingest.add_argument("--on", default=today())
@@ -353,6 +360,64 @@ def cmd_fill(args: argparse.Namespace) -> int:
         return 0
     print(f"\n准备写入 {len(updates)} 篇…")
     return _detail_rows(args, updates)
+
+
+NOTE_URL = "https://www.xiaohongshu.com/explore/{note_id}"
+TEXT_DIR = "notes-text"
+
+
+def cmd_links(args: argparse.Namespace) -> int:
+    """把「该采哪几篇」变成一串可直接点开的链接。
+
+    为什么有用：Ctrl+S 一次只能存一页，这个绕不过去（绕过就是自动化 = R2）。
+    但「找到下一篇 → 复制链接 → 打开」这几步可以省掉——一次生成清单，从上往下点。
+    """
+    rows = _merged_notes(args)
+    text_dir = REPO_ROOT / "account" / TEXT_DIR
+    pending: list[tuple[dict[str, Any], bool]] = []
+    for row in rows:
+        note_id = str(row.get("note_id") or "")
+        if not note_id:
+            continue
+        has_text = (text_dir / f"{note_id}.txt").is_file()
+        # 数字齐全就不用再打开页面了（正文有没有是另一回事，但页面只多给正文）
+        if not _missing_fields(row):
+            continue
+        pending.append((row, has_text))
+    pending.sort(key=lambda pair: -int(str(pair[0].get("likes") or 0)))
+    if args.limit:
+        pending = pending[: args.limit]
+    if not pending:
+        print("没有待采的详情页。")
+        return 0
+
+    lines = [
+        "# 待采详情页清单",
+        "",
+        "用法：**右键链接 → 在新标签页中打开**（不要从主页点开弹层）→ 等加载完 → Ctrl+S（仅 HTML）",
+        "→ 全部存完丢进 `account/inbox/` → `python account-research/ar.py ingest`",
+        "",
+        f"共 {len(pending)} 篇；标「已有正文」的只缺赞/藏/评。",
+        "",
+        "| # | 赞 | 标题 | 状态 | 链接 |",
+        "|---|---|---|---|---|",
+    ]
+    for index, (row, has_text) in enumerate(pending, start=1):
+        note_id = str(row.get("note_id"))
+        title = str(row.get("title") or "(无标题)").replace("|", "／")
+        status = "已有正文，缺数字" if has_text else "未采"
+        likes = str(row.get("likes") or "?")
+        lines.append(f"| {index} | {likes} | {title} | {status} | {NOTE_URL.format(note_id=note_id)} |")
+
+    text = "\n".join(lines) + "\n"
+    if args.out:
+        target = Path(args.out)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        print(f"已写入 {target}（{len(pending)} 篇）")
+        return 0
+    print(text)
+    return 0
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:

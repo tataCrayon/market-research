@@ -50,6 +50,8 @@
 python account-research/ar.py probe      <存档...>          # 判页面类型与归属（3 秒级，先于一切解析）
 python account-research/ar.py ingest     [目录]             # 采件箱：自动判别 HTML/粘贴块 → 入库 → 归档
 python account-research/ar.py gaps       [--limit N]        # 缺口清单（缺藏/评，按点赞降序）
+python account-research/ar.py links      [--limit N] [--out todo.md]   # 待采详情页的可点击链接清单
+python account-research/ar.py parse-detail <存档...>       # 详情页 HTML → 赞/藏/评/时长 + 正文归档
 python account-research/ar.py fill       [--limit N]        # 逐篇口播补数（交互式，一次提交）
 python account-research/ar.py parse      <存档...> --on 2026-10-22   # 主页存档 → accounts / notes
 python account-research/ar.py record     --file detail.json --on 2026-10-22   # 详情页人工补数（藏/评/时长）
