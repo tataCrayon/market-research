@@ -20,6 +20,7 @@ from .detail import extract_detail
 from .initialstate import REJECT_REASONS, ArchiveError, iter_note_cards, open_archive
 from .parser import parse_account, parse_blocks, parse_notes
 from .stats import summarize
+from .tokens import build_index as build_token_index, note_url
 from .validate import validate_dir, validate_tables
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -124,6 +125,8 @@ def build_parser() -> argparse.ArgumentParser:
     links.add_argument("--account", default="")
     links.add_argument("--topic", default="", help="只列某个母题（对应 notes.topic）")
     links.add_argument("--limit", type=int, default=0)
+    links.add_argument("--no-tokens", action="store_true",
+                       help="不读存档里的 xsec_token（生成的链接很可能 404）")
     links.add_argument("--out", default="", help="写成 markdown 文件；默认只打印")
     links.set_defaults(func=cmd_links)
 
@@ -458,10 +461,19 @@ def cmd_links(args: argparse.Namespace) -> int:
 
     为什么有用：Ctrl+S 一次只能存一页，这个绕不过去（绕过就是自动化 = R2）。
     但「找到下一篇 → 复制链接 → 打开」这几步可以省掉——一次生成清单，从上往下点。
+
+    ⚠️ 2026-10-28 实测纠错：**裸 `/explore/<id>` 链接现在打不开**，会跳
+    `/404?...error_code=300031 当前笔记暂时无法浏览`，平台还会要求扫码。
+    原因是链接缺 `xsec_token`。而你的主页存档里每张 noteCard 都自带这个 token，
+    所以这里从存档建一份 note_id → token 索引，把链接拼成能打开的形态。
+
+    但 token 是**会话级、会过期**的：它是从你某一天的存档里读出来的。
+    打不开时最稳的路仍然是**回主页点进那一篇**——那条路径永远带新鲜 token。
     """
     rows = _merged_notes(args)
     text_dir = REPO_ROOT / "account" / TEXT_DIR
-    pending: list[tuple[dict[str, Any], bool]] = []
+    tokens = build_token_index([REPO_ROOT / "account"]) if not args.no_tokens else {}
+    pending: list[tuple[dict[str, Any], bool, str]] = []
     for row in rows:
         note_id = str(row.get("note_id") or "")
         if not note_id:
@@ -470,31 +482,38 @@ def cmd_links(args: argparse.Namespace) -> int:
         # 数字齐全就不用再打开页面了（正文有没有是另一回事，但页面只多给正文）
         if not _missing_fields(row):
             continue
-        pending.append((row, has_text))
-    pending.sort(key=lambda pair: -int(str(pair[0].get("likes") or 0)))
+        pending.append((row, has_text, tokens.get(note_id, "")))
+    pending.sort(key=lambda triple: -int(str(triple[0].get("likes") or 0)))
     if args.limit:
         pending = pending[: args.limit]
     if not pending:
         print("没有待采的详情页。")
         return 0
 
+    with_token = sum(1 for _, _, token in pending if token)
     lines = [
         "# 待采详情页清单",
         "",
         "用法：**右键链接 → 在新标签页中打开**（不要从主页点开弹层）→ 等加载完 → Ctrl+S（仅 HTML）",
         "→ 全部存完丢进 `account/inbox/` → `python account-research/ar.py ingest`",
         "",
-        f"共 {len(pending)} 篇；标「已有正文」的只缺赞/藏/评。",
+        f"共 {len(pending)} 篇；标「已有正文」的只缺赞/藏/评。"
+        f"链接带 token：{with_token}/{len(pending)}。",
+        "",
+        "> ⚠️ token 是从你已保存的存档里读出来的，**会过期**。若某篇打开后跳到 404"
+        "（error_code=300031），说明 token 失效——回该账号主页点进那篇即可（永远带新 token）。",
         "",
         "| # | 赞 | 标题 | 状态 | 链接 |",
         "|---|---|---|---|---|",
     ]
-    for index, (row, has_text) in enumerate(pending, start=1):
+    for index, (row, has_text, token) in enumerate(pending, start=1):
         note_id = str(row.get("note_id"))
         title = str(row.get("title") or "(无标题)").replace("|", "／")
-        status = "已有正文，缺数字" if has_text else "未采"
+        status = "已有正文，缺数字" if has_text else ("未采" if token else "未采（无 token）")
         likes = str(row.get("likes") or "?")
-        lines.append(f"| {index} | {likes} | {title} | {status} | {NOTE_URL.format(note_id=note_id)} |")
+        lines.append(
+            f"| {index} | {likes} | {title} | {status} | {note_url(note_id, token)} |"
+        )
 
     text = "\n".join(lines) + "\n"
     if args.out:
@@ -502,8 +521,14 @@ def cmd_links(args: argparse.Namespace) -> int:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
         board_path = target.with_suffix(".html")
-        board_path.write_text(render_board(pending, NOTE_URL, _account_label(args)), encoding="utf-8")
-        print(f"已写入 {target} 与看板 {board_path}（{len(pending)} 篇）")
+        board_rows = [(row, has_text) for row, has_text, _ in pending]
+        board_path.write_text(
+            render_board(board_rows, NOTE_URL, _account_label(args), tokens=tokens),
+            encoding="utf-8",
+        )
+        print(f"已写入 {target} 与看板 {board_path}（{len(pending)} 篇，带 token {with_token} 篇）")
+        if with_token < len(pending):
+            print(f"⚠️ {len(pending) - with_token} 篇没有 token：打开可能 404，回主页点进去最稳。")
         print(f"打开看板：start {board_path}    或双击该文件")
         return 0
     print(text)

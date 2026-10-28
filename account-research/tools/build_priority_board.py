@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from account_research import store  # noqa: E402
 from account_research.board import render_board  # noqa: E402
+from account_research.tokens import build_index as build_token_index  # noqa: E402
 
 DATA = Path(__file__).resolve().parents[1] / "data"
 NOTE_URL = "https://www.xiaohongshu.com/explore/{note_id}"
@@ -40,10 +41,12 @@ def main() -> int:
         print(f"✓ {nickname} | {row.get('likes')} 赞 | {row.get('title')} | {why}")
 
     print(f"\n共 {len(picked)} 篇进入爆款优先清单")
-    html = render_board(picked, NOTE_URL, "跨账号 · 爆款优先")
+    tokens = build_token_index([DATA.parents[1] / "account"])
+    hit = sum(1 for row, _ in picked if tokens.get(str(row.get("note_id") or "")))
+    html = render_board(picked, NOTE_URL, "跨账号 · 爆款优先", tokens=tokens)
     target = DATA / "todo-爆款优先.html"
     target.write_text(html, encoding="utf-8")
-    print(f"看板已写入 {target}")
+    print(f"看板已写入 {target}（带 token {hit}/{len(picked)}）")
 
     # 顺带把 FuzzyPop 主页地址也提示出来（主页不走 note 链接）
     placeholder = [a for a in accounts.values() if store.is_placeholder_account(a)]

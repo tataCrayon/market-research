@@ -30,20 +30,33 @@ border-radius:10px;padding:12px 16px;margin-bottom:8px;text-decoration:none;colo
 .title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tag{font-size:12px;padding:2px 8px;border-radius:99px;background:#f2eee6;color:var(--muted);white-space:nowrap}
 .tag.done{background:#e5f0ea;color:var(--green)}
+.tag.warn{background:#fbe9e2;color:var(--clay)}
 .count{color:var(--muted);font-size:13px;margin-bottom:10px}
-"""
+.warn-line{background:#fbe9e2;border:1px solid #e8c3b4;border-radius:8px;padding:10px 14px;
+color:#8c3f22;font-size:13px;margin:0 0 16px}"""
 
 
-def _row_html(index: int, row: dict[str, Any], has_text: bool, note_url: str) -> str:
+def _row_html(
+    index: int, row: dict[str, Any], has_text: bool, note_url: str, token: str = ""
+) -> str:
     note_id = str(row.get("note_id") or "")
     title = str(row.get("title") or "(无标题)")
     likes = str(row.get("likes") or "?")
-    if has_text:
+    if not token:
+        state, cls = "无 token", "tag warn"
+    elif has_text:
         state, cls = "缺数字", "tag done"
     else:
         state, cls = "未采", "tag"
+    # 带 token 的链接才能打开；没有 token 的退回裸链接并明确标注（它会 404）
+    href = (
+        f"https://www.xiaohongshu.com/explore/{note_id}"
+        f"?xsec_token={html.escape(token)}&xsec_source=pc_user"
+        if token
+        else note_url.format(note_id=note_id)
+    )
     return (
-        f'<a class="row" href="{html.escape(note_url.format(note_id=note_id))}" target="_blank" rel="noopener">'
+        f'<a class="row" href="{href}" target="_blank" rel="noopener">'
         f'<span class="rank">{index}</span>'
         f'<span class="likes">{html.escape(likes)}</span>'
         f'<span class="title">{html.escape(title)}</span>'
@@ -52,13 +65,32 @@ def _row_html(index: int, row: dict[str, Any], has_text: bool, note_url: str) ->
     )
 
 
-def render_board(rows: list[tuple[dict[str, Any], bool]], note_url: str, account_label: str = "") -> str:
-    """生成单文件看板。`rows` = [(笔记行, 是否已有正文)]，调用方负责排序与截断。"""
+def render_board(
+    rows: list[tuple[dict[str, Any], bool]],
+    note_url: str,
+    account_label: str = "",
+    tokens: dict[str, str] | None = None,
+) -> str:
+    """生成单文件看板。`rows` = [(笔记行, 是否已有正文)]，调用方负责排序与截断。
+
+    `tokens` = {note_id: xsec_token}。有 token 才拼得出能打开的链接——
+    裸 `/explore/<id>` 现在会被平台判 404（error_code=300031）。
+    """
+    tokens = tokens or {}
     pending = len(rows)
     done = sum(1 for _, has_text in rows if has_text)
+    missing_token = sum(1 for row, _ in rows if not tokens.get(str(row.get("note_id") or "")))
     body = "\n".join(
-        _row_html(index, row, has_text, note_url) for index, (row, has_text) in enumerate(rows, start=1)
+        _row_html(index, row, has_text, note_url, tokens.get(str(row.get("note_id") or ""), ""))
+        for index, (row, has_text) in enumerate(rows, start=1)
     )
+    token_note = ""
+    if missing_token:
+        token_note = (
+            f'<p class="warn-line">⚠️ {missing_token} 篇缺 xsec_token（标「无 token」）：'
+            "这些链接点开会被平台判 <b>404</b>（<code>error_code=300031 当前笔记暂时无法浏览</code>）。"
+            "请回对应账号主页点进那篇——那条路径永远带新鲜 token。</p>"
+        )
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -67,7 +99,7 @@ def render_board(rows: list[tuple[dict[str, Any], bool]], note_url: str, account
 <body><div class="wrap">
 <h1>待采详情页</h1>
 <p class="sub">{html.escape(account_label)} · 共 {pending} 篇（其中 {done} 篇已有正文，只缺赞/藏/评）</p>
-
+{token_note}
 <div class="steps">
   <b>1.</b> 中键 / Ctrl+单击，一次连开 3–5 个链接（新标签页）<br>
   <b>2.</b> 逐个切过去，等页面加载完，按 <code>Ctrl+S</code> → 保存类型选「网页，仅 HTML」<br>
