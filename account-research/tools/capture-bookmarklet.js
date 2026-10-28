@@ -1,17 +1,20 @@
-// 小红书笔记详情页 · 采集辅助书签小工具（合规边界内）
+// 小红书笔记详情页 · 一键采集书签（v2：直接落文件）
 //
-// 它做什么：在你**已经打开并滚到互动栏**的笔记详情页上，点一下书签，
-//   把「笔记 id / 标题 / 赞 / 藏 / 评 / 时长」抄成一个结构化块，放进剪贴板。
-//   你粘回本地文件，`ar parse-text` 直接入库，不用再手工排版、不用剔除背景主页文字。
+// 【用法】在已经打开并滚到互动栏的笔记页，点一下书签 → 浏览器直接下载一个
+//   ar-note-<note_id>.txt 到你本机 → 丢进 account/inbox/ → `ar ingest` 入库。
+//   比 v1 少两步：不用复制、不用粘到文件里存盘。
 //
-// 它不做什么（红线，别改）：
-//   ✗ 不发任何网络请求（只读当前已渲染的 DOM 与地址栏）
-//   ✗ 不自动翻页 / 不批量 / 不点「下一条」
-//   ✗ 不调用任何平台接口、不模拟点击、不碰验证码
-//   → 与「人按 Ctrl+A」同一性质，只是把人眼抄写换成读页面已有文字。
+// 【它做什么】读当前页面**已经渲染出来的文字**，拼成一个结构化块，用 Blob 存成本地文件。
 //
-// 安装：新建书签 → 名称填「AR采集」→ URL 粘贴下面压缩成一行的 javascript: 版本。
-// 数字认不准时它会把候选数字列出来（candidates），**由你确认后填**——不猜。
+// 【它不做什么 —— 这几条是红线，改代码前先读 docs/采集节流-额度与依据.md】
+//   ✗ 不发任何网络请求（没有 fetch / XHR / WebSocket，也不碰平台接口）
+//   ✗ 不翻页、不滚动加载、不批量、不点「下一条」
+//   ✗ 不保存浏览器会话、不读 Cookie、不读 localStorage 之外的东西
+//   ✗ 不模拟人操作平台控件——唯一一次 click() 是点在自己新建的下载链接上，
+//     下载的是本机内存里的字符串，与平台没有任何交互
+//   → 本质仍是「人打开页面 → 人触发 → 工具读已加载的 DOM」，只是把抄写换成了读。
+//
+// 【安装】新建书签 → 名称填「AR采集」→ URL 粘贴本文件压缩成一行的 javascript: 版本。
 
 (function () {
   const BLOCK_START = "===AR-NOTE-v1===";
@@ -22,7 +25,7 @@
   const idMatch = url.match(/(?:explore|discovery\/item)\/([0-9a-f]{24})/i);
   const noteId = idMatch ? idMatch[1] : "";
 
-  // 只读当前页已渲染的节点；选择器取多个候补，命中即用，全不中就留空给人填。
+  // 只读当前已渲染的节点；多候补，命中即用，全不中就留空交给人。
   const nodes = [
     document.querySelector("#noteContainer"),
     document.querySelector(".note-detail-mask .note-container"),
@@ -39,15 +42,14 @@
   );
 
   // 互动栏原文：**不做数字解析**（选择器一改就变成静默错数据）。
-  // 把带标签的原文交给人一眼读数，比任何正则都可靠；candidates 只是抄写时的提示。
   const barText = clean(
     (document.querySelector(".interact-container") || scope).innerText || ""
   ).slice(0, 120);
   const candidates = (barText.match(/\d+(?:\.\d+)?\s*[万wW]?/g) || []).slice(0, 8).join(" | ");
 
-  const duration = clean((scope.querySelector("video") ? (scope.querySelector("video").duration || "") : "") || "");
+  const video = scope.querySelector("video");
   const mmss = text.match(/\b(\d{1,2}:\d{2})\b/);
-  const bodyHead = clean(text).slice(0, 40);
+  const bodyHead = text.slice(0, 40);
 
   const block = [
     BLOCK_START,
@@ -58,7 +60,7 @@
     "collects: ",
     "comments: ",
     "shares: ",
-    "duration: " + (mmss ? mmss[1] : duration),
+    "duration: " + (mmss ? mmss[1] : (video && video.duration ? String(video.duration) : "")),
     "human_note: ",
     "url: " + url.split("?")[0],
     "raw_len: " + text.length,
@@ -68,12 +70,17 @@
     BLOCK_END,
   ].join("\n");
 
-  navigator.clipboard.writeText(block).then(
-    () => alert(
-      (noteId ? "已复制 note_id=" + noteId : "没认出 note_id，请手填") +
-      "\n\n互动栏原文：\n" + (barText || "（没找到，请直接看页面）") +
-      "\n\n按原文填 赞/藏/评——别用候选值猜。"
-    ),
-    () => prompt("剪贴板不可用，请手动复制：", block)
+  // 本地生成文件：Blob 内容是本机内存里的字符串，不经过任何服务器。
+  const blob = new Blob([block], { type: "text/plain;charset=utf-8" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = "ar-note-" + (noteId || "unknown") + ".txt";
+  link.click();
+  URL.revokeObjectURL(link.href);
+
+  alert(
+    (noteId ? "已保存 ar-note-" + noteId + ".txt" : "没认出 note_id，文件名会是 ar-note-unknown.txt") +
+    "\n\n互动栏原文（照着填 赞/藏/评，别用候选值猜）：\n" + (barText || "（没找到，请直接看页面）") +
+    "\n\n下一步：`ar ingest` 直接入库。"
   );
 })();
