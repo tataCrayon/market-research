@@ -243,26 +243,43 @@ def _detail_rows(args: argparse.Namespace, updates: list[dict[str, Any]], allow_
 
     `allow_new`：详情页可能读到主页存档未覆盖的新笔记。此时允许新建行，
     但**发布时间留空**（详情页只给「3天前」这种相对值，推算日期 = 编数据）。
+
+    **归属靠 author_id，不靠"库里只有一个账号"**（2026-10-28 起）：
+    详情页里能读到作者主页链接（选择器抄自「小红书-同步开启博主首页」扩展，实测成立）。
+    有了它就能做到：**一个窗口里混着 3 个账号的笔记，一条命令各归各位**，
+    而外来的（非目标账号）笔记会被明确拒收，不会悄悄记到错的账号名下。
     """
     notes = store.read_table(args.data, "notes")
     latest = {str(row.get("note_id")): row for row in store.latest_per_note(notes)}
     accounts = {str(row.get("account_id")) for row in store.read_table(args.data, "accounts")}
-    default_account = str(getattr(args, "account", "") or (next(iter(accounts)) if len(accounts) == 1 else ""))
+    fallback = str(getattr(args, "account", "") or (next(iter(accounts)) if len(accounts) == 1 else ""))
     rows: list[dict[str, Any]] = []
     unknown: list[str] = []
+    foreign: list[str] = []
+    routed: dict[str, int] = {}
     for item in updates:
         note_id = str(item.get("note_id") or "").strip()
+        author_id = str(item.get("author_id") or "").strip()
+        # 归属优先取作者 id：它在详情页里是硬证据，不是猜测。
+        if author_id and author_id not in accounts:
+            if accounts:  # 库里有账号，但这个作者不在其中 → 外来的，拒收
+                foreign.append(f"{note_id}(作者 {author_id})")
+                continue
+        account_id = author_id if author_id in accounts else fallback
         base = latest.get(note_id)
         if base is None:
-            if not (allow_new and default_account):
+            if not (allow_new and account_id):
                 unknown.append(note_id or "(空)")
                 continue
             base = {column: "" for column in schema.NOTE_COLUMNS}
             base.update({
-                "account_id": default_account, "note_id": note_id, "pinned": "0",
+                "account_id": account_id, "note_id": note_id, "pinned": "0",
                 "title": str(item.get("title") or ""), "form": str(item.get("form") or ""),
                 "human_note": "来源=详情页 HTML；发布时间未取证（页面只显示相对时间）",
             })
+        else:
+            account_id = str(base.get("account_id") or account_id)
+        routed[account_id] = routed.get(account_id, 0) + 1
         row = dict(base)
         for field in ("likes", "collects", "comments", "shares", "duration", "human_note"):
             if str(item.get(field) or "").strip():
@@ -274,10 +291,15 @@ def _detail_rows(args: argparse.Namespace, updates: list[dict[str, Any]], allow_
             "grade": "②",
         })
         rows.append(row)
+    if foreign:
+        print(f"⏭  拒收 {len(foreign)} 个外来作者的笔记（不是已入库的账号）：{foreign[:5]}")
     if unknown:
         print(f"❌ 这些 note_id 在 notes 表里找不到（先 parse 主页存档）：{unknown}")
-        if not rows:
-            return 1
+    if not rows:
+        return 1
+    if len(routed) > 1:
+        detail = "、".join(f"{acc[-6:]}:{n} 篇" for acc, n in routed.items())
+        print(f"🔀 按作者归属分流到 {len(routed)} 个账号 → {detail}")
     return _commit_rows(args, "notes", rows)
 
 

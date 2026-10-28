@@ -21,6 +21,11 @@ TITLE_RE = re.compile(r'<h1[^>]*id="detail-title"[^>]*>(.*?)</h1>', re.S)
 DESC_RE = re.compile(r'<div[^>]*id="detail-desc"[^>]*>(.*?)</div>', re.S)
 TAG_RE = re.compile(r'id="hash-tag"[^>]*>(.*?)</a>', re.S)
 AUTHOR_RE = re.compile(r'class="username"[^>]*>([^<]{1,40})<')
+# 作者主页链接：抄「小红书 - 同步开启博主首页」扩展的选择器（.author-container .info>a），
+# 实测在真实详情页里成立。这个 id 用来做**归属校验**——判断详情页里的作者是不是目标账号。
+AUTHOR_LINK_RE = re.compile(
+    r'class="author-container".{0,900}?href="[^"]*?/user/profile/([0-9a-f]{24})', re.S
+)
 TAG_STRIP_RE = re.compile(r"<[^>]+>")
 WS_RE = re.compile(r"[\s\u3000]+")
 INTERACT_RE = re.compile(r'class="interact-container"')
@@ -51,6 +56,7 @@ class DetailFields:
     og_url: str = ""
     title: str = ""
     author: str = ""
+    author_id: str = ""
     form: str = ""
     likes: str = ""
     collects: str = ""
@@ -75,6 +81,7 @@ class DetailFields:
             "collects": self.collects,
             "comments": self.comments,
             "duration": self.duration,
+            "author_id": self.author_id,
         }
 
 
@@ -107,6 +114,8 @@ def extract_detail(html: str) -> DetailFields:
 
     author_match = AUTHOR_RE.search(html)
     fields.author = _text(author_match.group(1)) if author_match else ""
+    link_match = AUTHOR_LINK_RE.search(html)
+    fields.author_id = link_match.group(1) if link_match else ""
 
     bar = interact_bar_slice(html)
     for name, pattern in COUNT_IN_BAR_RES.items():

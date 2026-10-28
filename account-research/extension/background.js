@@ -111,12 +111,19 @@ function collectFromPage() {
   ).slice(0, 120);
   const candidates = (barText.match(/\d+(?:\.\d+)?\s*[万wW]?/g) || []).slice(0, 8).join(" | ");
 
+  // 作者 id：用来做**归属校验**——一个窗口里混着多个账号的笔记时靠它各归各位。
+  // 选择器抄自「小红书 - 同步开启博主首页」扩展（.author-container .info>a），实测在详情页成立。
+  const authorLink = document.querySelector('.author-container a[href*="/user/profile/"]');
+  const authorMatch = (authorLink ? authorLink.href : "").match(/\/user\/profile\/([0-9a-f]{24})/i);
+  const authorId = authorMatch ? authorMatch[1] : "";
+
   const video = scope.querySelector("video");
   const mmss = text.match(/\b(\d{1,2}:\d{2})\b/);
   const block = [
     BLOCK_START,
     "note_id: " + noteId,
     "title: " + title,
+    "author_id: " + authorId,
     "published: ",
     "likes: ",
     "collects: ",
@@ -132,5 +139,5 @@ function collectFromPage() {
     BLOCK_END,
   ].join("\n");
 
-  return { block, noteId, barText };
+  return { block, noteId, authorId, barText };
 }
