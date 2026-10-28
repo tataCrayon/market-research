@@ -56,6 +56,55 @@ def _cell(value: Any) -> str:
     return str(value)
 
 
+PLACEHOLDER_MARK = "缺主页存档"
+
+
+def is_placeholder_account(row: dict[str, Any]) -> bool:
+    """占位账号 = 由详情页/采集块顺手建出来的账号行，**没有任何主页字段**。
+
+    为什么需要这个概念：`accounts` 的键是 (account_id, collected_on)。同一天先建了占位行，
+    当天再采到真实主页存档时键就撞了 → 真实数据被静默跳过。
+    实测踩到过：知新的AI笔记的主页存档解析出粉丝 16821，但因为没有新键，一行都没写进去。
+
+    占位行不是证据，是 TODO 标记，所以允许被真实主页行**整行替换**——
+    这是 append-only 的唯一例外，理由：留着一个空壳行会永久挡住真数据。
+    """
+    return PLACEHOLDER_MARK in str(row.get("note") or "")
+
+
+def _filled_count(row: dict[str, Any], columns: Iterable[str]) -> int:
+    return sum(1 for col in columns if str(row.get(col) or "").strip())
+
+
+def upgrade_placeholders(
+    existing: list[dict[str, Any]], name: str, rows: Iterable[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], int]:
+    """用真实主页行替换同键的占位账号行。返回 (新表, 替换数)。
+
+    只对 `accounts` 生效，且只在「旧行是占位、新行不是、且新行信息更多」时替换。
+    其它表一律不动——那是证据，不能被改写。
+    """
+    if name != "accounts":
+        return existing, 0
+    columns = schema.TABLE_COLUMNS["accounts"]
+    index_by_key = {_row_key(name, row): index for index, row in enumerate(existing)}
+    upgraded = list(existing)
+    replaced = 0
+    seen: set[tuple[str, ...]] = set()
+    for row in rows:
+        key = _row_key(name, row)
+        if key in seen or key not in index_by_key:
+            continue
+        index = index_by_key[key]
+        current = upgraded[index]
+        if is_placeholder_account(current) and not is_placeholder_account(row):
+            if _filled_count(row, columns) > _filled_count(current, columns):
+                upgraded[index] = row
+                seen.add(key)
+                replaced += 1
+    return upgraded, replaced
+
+
 def preview_append(existing: list[dict[str, Any]], name: str, rows: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
     """纯函数：算出「哪些行会新增」，不落盘。
 

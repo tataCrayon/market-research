@@ -216,10 +216,19 @@ def _commit_tables(args: argparse.Namespace, updates: dict[str, list[dict[str, A
 
     支持一次提交多张表：采集收件箱可能同时产出账号行与笔记行，分两次写会留下
     「账号进了、笔记被拒」的半截状态。
+
+    `accounts` 有一处例外：同键的**占位账号**（由详情页顺手建的、没有任何主页字段）
+    会被真实主页存档整行替换。原因见 `store.is_placeholder_account`——
+    留着一个空壳行会永久挡住真数据（实测踩过：粉丝 16821 被静默跳过）。
     """
     tables = {name: store.read_table(args.data, name) for name in schema.TABLE_COLUMNS}
     fresh_map: dict[str, list[dict[str, Any]]] = {}
+    upgraded_total = 0
     for table, rows in updates.items():
+        upgraded, replaced = store.upgrade_placeholders(tables[table], table, rows)
+        if replaced:
+            tables[table] = upgraded
+            upgraded_total += replaced
         fresh, _ = store.preview_append(tables[table], table, rows)
         fresh_map[table] = fresh
         tables[table] = tables[table] + fresh
@@ -230,6 +239,9 @@ def _commit_tables(args: argparse.Namespace, updates: dict[str, list[dict[str, A
             print(f"{'❌' if issue.level == 'ERROR' else '⚠️'} [{issue.code}] {issue.message}")
         print(f"\n写入被拒：{len(errors)} 条 ERROR。**本次一行都没写**，修好再重跑。")
         return 1
+    if upgraded_total:
+        store.replace_table(args.data, "accounts", tables["accounts"])
+        print(f"accounts：{upgraded_total} 个占位账号被主页存档替换（仍是 {len(tables['accounts'])} 行）")
     for table, fresh in fresh_map.items():
         if fresh:
             store.append_rows(args.data, table, fresh)
