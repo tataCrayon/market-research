@@ -134,6 +134,13 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--data", default=str(DEFAULT_DATA))
     status.add_argument("--account", default="")
     status.set_defaults(func=cmd_status)
+
+    quota = sub.add_parser("quota", help="今天的采集额度：采了几个号、几篇详情，还剩多少")
+    quota.add_argument("--data", default=str(DEFAULT_DATA))
+    quota.add_argument("--on", default=today())
+    quota.add_argument("--accounts", type=int, default=3, help="单日账号上限（默认 3）")
+    quota.add_argument("--notes", type=int, default=30, help="单日详情页上限（默认 30）")
+    quota.set_defaults(func=cmd_quota)
     return root
 
 
@@ -587,6 +594,46 @@ def _archive_body(fields: Any) -> str:
     return str(target.relative_to(REPO_ROOT))
 
 
+def cmd_quota(args: argparse.Namespace) -> int:
+    """今天的采集额度（节流表，不是执行器）。
+
+    **它只告诉人还能采多少，不会自己去采。** 这就是「控制规模」的落地形态：
+    规模限制的意义是「降低单日请求量」，所以它必须约束**人的动作**，
+    不可能用一段会自己发请求的代码去实现——那等于用违规手段做合规保护。
+
+    额度怎么定：见 docs/采集节流-额度与依据.md。默认 3 号/日、30 详情/日。
+    """
+    accounts = store.read_table(args.data, "accounts")
+    notes = store.read_table(args.data, "notes")
+    # 只算「人真的打开过的页面」：主页存档 = 公开页通道；详情 = 复制文本/截图通道。
+    # 一次主页解析会产出 30+ 行笔记，但那是**一个**页面动作，不能算成 30 次详情采集。
+    profile_accounts = sorted({
+        str(r.get("account_id")) for r in accounts
+        if str(r.get("collected_on")) == args.on and str(r.get("source_kind")) == "公开页"
+    })
+    detail_notes = sorted({
+        str(r.get("note_id")) for r in notes
+        if str(r.get("collected_on")) == args.on and str(r.get("source_kind")) in ("复制文本", "截图")
+    })
+    left_a = max(0, args.accounts - len(profile_accounts))
+    left_n = max(0, args.notes - len(detail_notes))
+
+    print(f"=== {args.on} 采集额度 ===")
+    print(f"主页：已采 {len(profile_accounts)} / {args.accounts}    剩余 {left_a}")
+    print(f"详情：已采 {len(detail_notes)} / {args.notes}    剩余 {left_n}")
+    print()
+    over = len(profile_accounts) > args.accounts or len(detail_notes) > args.notes
+    if over:
+        print("⚠️ 已超额度。**今天停手**——超额本身就是风险信号，不是成就。")
+        return 1
+    if left_a == 0 or left_n == 0:
+        print("今日额度用尽，明天再继续。中断不是失败：分天取样本来就是 SOP 的一部分。")
+        return 0
+    print(f"今天还能采：{left_a} 个账号主页、{left_n} 篇详情。")
+    print(f"下一步：`ar links --limit {min(left_n, 5)}` 拿清单 → 看板里中键连开 → Ctrl+S → `ar ingest`")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """进度总览：这一步该干什么，不用翻文档。
 
@@ -614,6 +661,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"校验：{len(errors)} ERROR / {len(issues) - len(errors)} WARN"
           + ("（有错误，先修再继续）" if errors else " ✅"))
     print()
+    quota = _quota_line(args.data)
+    if quota:
+        print(quota)
     if pending_files:
         print("下一步：`ar ingest` 把采件箱里的文件入库。")
     elif missing:
@@ -622,6 +672,18 @@ def cmd_status(args: argparse.Namespace) -> int:
     else:
         print("下一步：数据齐了，可以跑拆解（`ar add verdicts` 等四张表）。")
     return 0
+
+
+def _quota_line(data_dir: str | Path) -> str:
+    """把剩余额度并进 status 一行，省掉一次单独命令——但额度仍是只读。"""
+    on = today()
+    accounts = store.read_table(data_dir, "accounts")
+    notes = store.read_table(data_dir, "notes")
+    done_a = len({str(r.get("account_id")) for r in accounts
+                  if str(r.get("collected_on")) == on and str(r.get("source_kind")) == "公开页"})
+    done_n = len({str(r.get("note_id")) for r in notes
+                  if str(r.get("collected_on")) == on and str(r.get("source_kind")) in ("复制文本", "截图")})
+    return f"今日额度：主页 {done_a}/3 | 详情 {done_n}/30（`ar quota` 看详情）"
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
