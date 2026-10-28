@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "AR 采集（account-research）",
-  "version": "1.0.0",
-  "description": "在当前已打开的小红书笔记页读已渲染文字，存成 ar-note-<id>.txt 到本机。零网络请求。",
-  "permissions": ["activeTab", "scripting", "downloads"],
+  "version": "2.0.0",
+  "description": "点一下，把当前窗口里所有已打开的小红书笔记页各存一个 txt。不发请求、不导航、不开新页。",
+  "permissions": ["scripting", "downloads"],
+  "host_permissions": ["https://www.xiaohongshu.com/*"],
   "action": {
-    "default_title": "AR 采集：读当前页 → 存 txt",
+    "default_title": "AR 采集：批量保存当前窗口里所有小红书笔记页",
     "default_icon": {
       "16": "icon16.png",
       "48": "icon48.png",

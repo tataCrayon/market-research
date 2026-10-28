@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -141,6 +142,14 @@ def build_parser() -> argparse.ArgumentParser:
     quota.add_argument("--accounts", type=int, default=3, help="单日账号上限（默认 3）")
     quota.add_argument("--notes", type=int, default=30, help="单日详情页上限（默认 30）")
     quota.set_defaults(func=cmd_quota)
+
+    watch = sub.add_parser("watch", help="守着采件箱：文件一落进来就自动入库（Ctrl+C 停）")
+    watch.add_argument("--path", default=str(DEFAULT_INBOX))
+    watch.add_argument("--interval", type=float, default=3.0, help="轮询间隔秒（默认 3）")
+    watch.add_argument("--on", default=today())
+    watch.add_argument("--data", default=str(DEFAULT_DATA))
+    watch.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    watch.set_defaults(func=cmd_watch)
     return root
 
 
@@ -632,6 +641,54 @@ def cmd_quota(args: argparse.Namespace) -> int:
     print(f"今天还能采：{left_a} 个账号主页、{left_n} 篇详情。")
     print(f"下一步：`ar links --limit {min(left_n, 5)}` 拿清单 → 看板里中键连开 → Ctrl+S → `ar ingest`")
     return 0
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    """守着采件箱，文件落地即入库。
+
+    **它监视的是本地文件夹，不是任何网页。** 浏览器下载完成的那一刻文件才出现，
+    本命令只对已经落盘的文件做事——边界没有移动：页面依然由你打开，请求依然由你产生。
+
+    为什么值得做：逐篇采时最烦的不是点图标，是**每采一篇要回终端跑一次命令**。
+    有了它，你可以一次采 10 篇，全程不看终端。
+    """
+    inbox = Path(args.path)
+    inbox.mkdir(parents=True, exist_ok=True)
+    suffix_ok = (".html", ".htm", ".txt", ".md")
+    seen: set[str] = set()
+    ingested = 0
+    print(f"👀 正在监视 {inbox}")
+    print(f"   每 {args.interval:g} 秒扫描一次；文件落进来就自动入库。Ctrl+C 停止。")
+    print("   把 Chrome 的下载目录设成这个文件夹，采完就不用再管了。\n")
+    try:
+        while True:
+            pending = [
+                p for p in sorted(inbox.iterdir())
+                if p.is_file() and p.suffix.lower() in suffix_ok and str(p) not in seen
+            ]
+            for path in pending:
+                seen.add(str(path))
+                if not path.is_file():
+                    continue
+                print(f"── 发现 {path.name}")
+                sub_args = argparse.Namespace(
+                    path=[str(path)], on=args.on, data=args.data, ledger=args.ledger,
+                )
+                try:
+                    code = cmd_ingest(sub_args)
+                except Exception as exc:  # 单个坏文件不该让监视线程死掉
+                    print(f"⚠️ 入库失败：{exc}")
+                    code = 1
+                if code == 0:
+                    ingested += 1
+                    print()
+                else:
+                    print("（文件留在原地，修好后再跑）\n")
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print(f"\n已停止。本次自动入库 {ingested} 个文件。")
+        print("跑 `ar status` 看当前进度。")
+        return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
