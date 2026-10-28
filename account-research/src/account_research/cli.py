@@ -122,6 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     links = sub.add_parser("links", help="生成待采集的详情页链接清单（点一个存一个）")
     links.add_argument("--data", default=str(DEFAULT_DATA))
     links.add_argument("--account", default="")
+    links.add_argument("--topic", default="", help="只列某个母题（对应 notes.topic）")
     links.add_argument("--limit", type=int, default=0)
     links.add_argument("--out", default="", help="写成 markdown 文件；默认只打印")
     links.set_defaults(func=cmd_links)
@@ -376,6 +377,8 @@ def _merged_notes(args: argparse.Namespace) -> list[dict[str, Any]]:
     notes = store.read_table(args.data, "notes")
     if args.account:
         notes = [row for row in notes if str(row.get("account_id")) == args.account]
+    if getattr(args, "topic", ""):
+        notes = [row for row in notes if str(row.get("topic") or "") == args.topic]
     return store.latest_per_note(notes)
 
 
