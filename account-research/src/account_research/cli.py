@@ -99,6 +99,8 @@ def build_parser() -> argparse.ArgumentParser:
     detail.add_argument("files", nargs="+")
     detail.add_argument("--on", default=today())
     detail.add_argument("--account", default="", help="账号 id（详情页读到主页未覆盖的新笔记时必填）")
+    detail.add_argument("--new-authors", action="store_true",
+                        help="作者不在库里时按作者名建占位账号（默认拒收）")
     detail.add_argument("--data", default=str(DEFAULT_DATA))
     detail.add_argument("--ledger", default=str(DEFAULT_LEDGER))
     detail.set_defaults(func=cmd_parse_detail)
@@ -127,6 +129,8 @@ def build_parser() -> argparse.ArgumentParser:
     ingest = sub.add_parser("ingest", help="采件箱：自动识别 HTML 与粘贴块，入库并归档")
     ingest.add_argument("path", nargs="*", default=[], help="目录或单个文件；省略=account/inbox")
     ingest.add_argument("--on", default=today())
+    ingest.add_argument("--new-authors", action="store_true",
+                        help="作者不在库里时按作者名建占位账号（默认拒收，防止串号）")
     ingest.add_argument("--data", default=str(DEFAULT_DATA))
     ingest.add_argument("--ledger", default=str(DEFAULT_LEDGER))
     ingest.set_defaults(func=cmd_ingest)
@@ -147,6 +151,8 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--path", default=str(DEFAULT_INBOX))
     watch.add_argument("--interval", type=float, default=3.0, help="轮询间隔秒（默认 3）")
     watch.add_argument("--on", default=today())
+    watch.add_argument("--new-authors", action="store_true",
+                       help="作者不在库里时自动建占位账号（默认拒收）")
     watch.add_argument("--data", default=str(DEFAULT_DATA))
     watch.add_argument("--ledger", default=str(DEFAULT_LEDGER))
     watch.set_defaults(func=cmd_watch)
@@ -246,23 +252,39 @@ def _detail_rows(args: argparse.Namespace, updates: list[dict[str, Any]], allow_
 
     **归属靠 author_id，不靠"库里只有一个账号"**（2026-10-28 起）：
     详情页里能读到作者主页链接（选择器抄自「小红书-同步开启博主首页」扩展，实测成立）。
-    有了它就能做到：**一个窗口里混着 3 个账号的笔记，一条命令各归各位**，
-    而外来的（非目标账号）笔记会被明确拒收，不会悄悄记到错的账号名下。
+    有了它就能做到：**一个窗口里混着 3 个账号的笔记，一条命令各归各位**。
+
+    外来作者默认**拒收**（防止 author_id 抄错时悄悄造出一个垃圾账号）。
+    要收就显式开 `--new-authors`：会按详情页里看到的作者名建一条**待补主页的占位账号**
+    （粉丝/简介等仍是 ⬜），并在 `ar status` 里提醒你补主页存档。
     """
     notes = store.read_table(args.data, "notes")
     latest = {str(row.get("note_id")): row for row in store.latest_per_note(notes)}
     accounts = {str(row.get("account_id")) for row in store.read_table(args.data, "accounts")}
     fallback = str(getattr(args, "account", "") or (next(iter(accounts)) if len(accounts) == 1 else ""))
+    allow_new_authors = bool(getattr(args, "new_authors", False))
     rows: list[dict[str, Any]] = []
+    account_rows: list[dict[str, Any]] = []
     unknown: list[str] = []
     foreign: list[str] = []
     routed: dict[str, int] = {}
     for item in updates:
         note_id = str(item.get("note_id") or "").strip()
         author_id = str(item.get("author_id") or "").strip()
-        # 归属优先取作者 id：它在详情页里是硬证据，不是猜测。
+        author_name = str(item.get("author_name") or "").strip()
         if author_id and author_id not in accounts:
-            if accounts:  # 库里有账号，但这个作者不在其中 → 外来的，拒收
+            if allow_new_authors:
+                accounts.add(author_id)
+                account_rows.append({
+                    "account_id": author_id,
+                    "nickname": author_name,
+                    "platform": schema.PLATFORM,
+                    "source_kind": "复制文本",
+                    "collected_on": args.on,
+                    "grade": "②",
+                    "note": "由详情页/采集块自动建号；**缺主页存档**，粉丝/简介等为 ⬜，需要补一次主页 Ctrl+S",
+                })
+            elif accounts:  # 外来的，且没开 --new-authors → 拒收
                 foreign.append(f"{note_id}(作者 {author_id})")
                 continue
         account_id = author_id if author_id in accounts else fallback
@@ -290,16 +312,23 @@ def _detail_rows(args: argparse.Namespace, updates: list[dict[str, Any]], allow_
             "source_file": str(item.get("source_file") or ""),
             "grade": "②",
         })
+        if author_id:
+            row["author_id"] = author_id
         rows.append(row)
     if foreign:
         print(f"⏭  拒收 {len(foreign)} 个外来作者的笔记（不是已入库的账号）：{foreign[:5]}")
+        print("   要收就加 `--new-authors`：会按看到的作者名建占位账号，粉丝/简介仍是 ⬜，需补主页存档。")
     if unknown:
         print(f"❌ 这些 note_id 在 notes 表里找不到（先 parse 主页存档）：{unknown}")
-    if not rows:
+    if not rows and not account_rows:
         return 1
     if len(routed) > 1:
         detail = "、".join(f"{acc[-6:]}:{n} 篇" for acc, n in routed.items())
         print(f"🔀 按作者归属分流到 {len(routed)} 个账号 → {detail}")
+    if account_rows:
+        print(f"🆕 新建 {len(account_rows)} 个占位账号（缺主页）："
+              f"{[row['account_id'][-6:] for row in account_rows]}")
+        return _commit_tables(args, {"accounts": account_rows, "notes": rows})
     return _commit_rows(args, "notes", rows)
 
 
@@ -554,7 +583,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         if code:
             return code
     if block_items:
-        code = _detail_rows(args, block_items)
+        code = _detail_rows(args, block_items, allow_new=True)
         if code:
             return code
     for path, reason in skipped:
@@ -695,6 +724,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 print(f"── 发现 {path.name}")
                 sub_args = argparse.Namespace(
                     path=[str(path)], on=args.on, data=args.data, ledger=args.ledger,
+                    new_authors=getattr(args, "new_authors", False),
                 )
                 try:
                     code = cmd_ingest(sub_args)

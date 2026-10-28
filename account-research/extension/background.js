@@ -90,6 +90,16 @@ function collectFromPage() {
   const idMatch = url.match(/(?:explore|discovery\/item)\/([0-9a-f]{24})/i);
   const noteId = idMatch ? idMatch[1] : "";
 
+  // 正文容器：优先 #detail-desc（小红书真正的正文节点），再退 .note-scroller。
+  // ⚠️ 2026-10-28 实测踩坑：#noteContainer 在部分页面不存在或只包住外层框架，
+  // 用它当 scope 会把「1/6 作者名 关注」这种页面框架文字当成正文——
+  // body_head 看起来"有内容"，其实一个字正文都没有。所以正文单独取，不靠 scope。
+  const descEl =
+    document.querySelector("#detail-desc") ||
+    document.querySelector(".note-content .desc") ||
+    document.querySelector(".note-scroller");
+  const bodyText = clean(descEl ? descEl.innerText || "" : "");
+
   const nodes = [
     document.querySelector("#noteContainer"),
     document.querySelector(".note-detail-mask .note-container"),
@@ -116,6 +126,9 @@ function collectFromPage() {
   const authorLink = document.querySelector('.author-container a[href*="/user/profile/"]');
   const authorMatch = (authorLink ? authorLink.href : "").match(/\/user\/profile\/([0-9a-f]{24})/i);
   const authorId = authorMatch ? authorMatch[1] : "";
+  const authorName = clean(
+    (document.querySelector(".author-container .username") || {}).textContent || ""
+  );
 
   const video = scope.querySelector("video");
   const mmss = text.match(/\b(\d{1,2}:\d{2})\b/);
@@ -124,6 +137,7 @@ function collectFromPage() {
     "note_id: " + noteId,
     "title: " + title,
     "author_id: " + authorId,
+    "author_name: " + authorName,
     "published: ",
     "likes: ",
     "collects: ",
@@ -132,12 +146,12 @@ function collectFromPage() {
     "duration: " + (mmss ? mmss[1] : video && video.duration ? String(video.duration) : ""),
     "human_note: ",
     "url: " + url.split("?")[0],
-    "raw_len: " + text.length,
-    "body_head: " + text.slice(0, 40),
+    "raw_len: " + bodyText.length,
+    "body_head: " + bodyText.slice(0, 40),
     "bar_text: " + barText,
     "candidates: " + candidates,
     BLOCK_END,
   ].join("\n");
 
-  return { block, noteId, authorId, barText };
+  return { block, noteId, authorId, authorName, barText };
 }

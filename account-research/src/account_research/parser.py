@@ -133,7 +133,8 @@ def parse_notes(archive: Archive, account_id: str, collected_on: str) -> tuple[l
 BLOCK_START = "===AR-NOTE-v1==="
 BLOCK_END = "===END==="
 BLOCK_FIELDS = (
-    "note_id", "title", "published", "likes", "collects", "comments",
+    "note_id", "title", "author_id", "author_name", "published",
+    "likes", "collects", "comments",
     "shares", "duration", "human_note", "url", "raw_len", "candidates",
 )
 BLANK_MARKS = ("", "-", "⬜", "未取证", "null", "None")

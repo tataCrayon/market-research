@@ -97,6 +97,26 @@ class TestMultiAccountRouting(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(store.read_table(self.data, "notes"), [])
 
+    def test_new_authors_flag_creates_placeholder_account(self):
+        """显式开 --new-authors 才收外来作者，且必须建成『缺主页』的占位账号。"""
+        import argparse
+        from account_research.cli import _detail_rows
+        args = argparse.Namespace(data=str(self.data), ledger="", on="2026-10-28",
+                                  account="", new_authors=True)
+        code = _detail_rows(args, [{
+            "note_id": "n-foreign", "title": "外人笔记", "author_id": "ffffffffffffffffffffffff",
+            "author_name": "某新博主", "likes": "42", "collects": "7", "comments": "1",
+        }], allow_new=True)
+        self.assertEqual(code, 0)
+        created = [r for r in store.read_table(self.data, "accounts")
+                   if r["account_id"] == "ffffffffffffffffffffffff"]
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["nickname"], "某新博主")
+        self.assertIn("缺主页存档", created[0]["note"])
+        self.assertEqual(created[0]["fans"], "")   # 粉丝必须留空，不能编
+        note = next(r for r in store.read_table(self.data, "notes") if r["note_id"] == "n-foreign")
+        self.assertEqual(note["account_id"], "ffffffffffffffffffffffff")
+
     def test_existing_note_keeps_its_account(self):
         store.append_rows(self.data, "notes", [self._note("n-old", ACC_A)])
         code = self._run([{"note_id": "n-old", "author_id": ACC_B, "likes": "999",
