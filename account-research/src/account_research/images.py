@@ -35,6 +35,9 @@ DOM_SLIDER_START = "note-slider"
 DOM_SLIDER_END = "note-scroller"
 SLIDE_INDEX_RE = re.compile(r'data-swiper-slide-index="(\d+)"')
 SLIDE_IMG_RE = re.compile(r'src="(\./[^"]*_files/[^"]+)"')
+# 平台自己渲染的「第几张/共几张」计数器：`<div class="fraction">1/26</div>`
+# 这是唯一一个**由平台给出**的总数，用来校验我们到底有没有把图绑全。
+FRACTION_RE = re.compile(r'class="[^"]*\bfraction\b[^"]*"[^>]*>\s*\d+\s*/\s*(\d+)\s*<')
 URL_KEYS = ("urlDefault", "url", "urlPre")
 # 比重叠时只留中文与字母数字：OCR 会插换行、也会把标点认成别的符号
 NON_WORD_RE = re.compile(r"[^\u4e00-\u9fff\w]")
@@ -59,6 +62,7 @@ class NoteImages:
     note_id: str
     source: str
     images: list[NoteImage] = field(default_factory=list)
+    declared: int | None = None   # 平台计数器给的总张数；拿不到就是 None
 
     @property
     def total(self) -> int:
@@ -70,6 +74,17 @@ class NoteImages:
 
     def missing(self) -> list[int]:
         return [image.index for image in self.images if not image.resolved]
+
+    @property
+    def incomplete(self) -> bool:
+        """绑到的张数少于平台声明的张数。
+
+        **为什么需要它**：`source` 说「绑上了」不等于「绑全了」。平台自己在
+        `<div class="fraction">1/26</div>` 里给了总张数，那是唯一可信的外部口径。
+        少了就说明我们漏了图（要修解析），不少就说明原始数据本身就只有这些
+        （要记 ⬜，别去改代码）。
+        """
+        return self.declared is not None and self.total < self.declared
 
 
 def images_dir(archive: Path) -> Path:
@@ -316,6 +331,16 @@ def dom_images(html: str, files: dict[str, Path]) -> list[NoteImage]:
     return images
 
 
+def declared_total(html: str) -> int | None:
+    """平台自己渲染的「共几张」。取不到返回 None —— **不猜、不用我们自己的张数顶替**。
+
+    实测 5 篇详情页全部带这个计数器（`1/26`、`2/24`、`1/5`、`2/6`、`3/8`），
+    分母与我们从 `imageList`/DOM 取到的张数完全一致——所以它能当外部校验基准。
+    """
+    match = FRACTION_RE.search(html)
+    return int(match.group(1)) if match else None
+
+
 def collect(
     archive_path: Path,
     state: dict[str, Any] | None = None,
@@ -327,6 +352,7 @@ def collect(
     `search_root` 用于救回「HTML 被搬走、_files 落在原地」的存档（见 locate_files_dir）。
     """
     text = html or archive_path.read_text(encoding="utf-8", errors="replace")
+    declared = declared_total(text)
     from_state = image_lists_from_state(state or {})
     candidates = from_state or raw_image_lists(text)
     entries_all = [entry for _, entries in candidates for entry in entries]
@@ -343,11 +369,13 @@ def collect(
         if not any(image.resolved for image in resolved):
             # 一张都没绑定成功 → 这份存档只存了 HTML，没有伴随目录，如实标注
             source = f"{source}(未存图)"
-        return NoteImages(note_id=note_id or list_note_id, source=source, images=resolved)
+        return NoteImages(note_id=note_id or list_note_id, source=source,
+                          images=resolved, declared=declared)
     slides = dom_slides(text, files)
     if slides:
-        return NoteImages(note_id=note_id, source="dom_slider", images=slides)
-    return NoteImages(note_id=note_id, source="dom", images=dom_images(text, files))
+        return NoteImages(note_id=note_id, source="dom_slider", images=slides, declared=declared)
+    return NoteImages(note_id=note_id, source="dom",
+                      images=dom_images(text, files), declared=declared)
 
 
 # ---- OCR：本地引擎，按需加载；缺依赖时明确报错，不静默降级 ----
@@ -411,13 +439,16 @@ def render_text(
     blocks = [
         f"# {header.get('title') or '(无标题)'}",
         f"# note_id：{note.note_id}",
-        f"# 图片数：{note.total}（本地命中 {note.local}）",
+        f"# 图片数：{note.total}（本地命中 {note.local}）"
+        + (f" · 平台声明 {note.declared}" + ("，**不全**" if note.incomplete else "，已绑全")
+           if note.declared is not None else " · 平台未声明张数"),
         f"# 来源：{note.source} · OCR 引擎：RapidOCR（本机 onnxruntime）",
         f"# 篇幅：{image_dominance(image_chars, text_chars)}",
         f"# 与正文层的关系：{relation}",
         "# 等级：图上文字 ②（原图在本地可复核）/ 段落与版式 ③-a（OCR 换行 ≠ 原作者分段）",
         "# ⚠️ OCR 有误差：置信 <0.80 或字数 <10 的图标了『低质量』，引用前必须看原图",
         "# ⚠️ 正文层（notes-text/<note_id>.txt）与图上文字可能不是同一版：两版都要留，不得互相覆盖",
+        "# ⚠️ 末图可能本身就是半句：图上文字不等于作者全文，尾部残缺要对照原图确认再引用",
         "",
     ]
     for image in note.images:

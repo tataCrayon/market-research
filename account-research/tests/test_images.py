@@ -20,14 +20,17 @@ NOTE_ID = "0000000000000000000000f1"
 
 
 def detail_html(image_list: list[dict] | None = None, *, slide_names: list[str] | None = None,
-                body: str = "第一段正文。") -> str:
-    """造一份最小详情页：og:url + 正文 + 可选 imageList + 可选 swiper。"""
+                body: str = "第一段正文。", declared: int | None = None) -> str:
+    """造一份最小详情页：og:url + 正文 + 可选 imageList + 可选 swiper + 可选张数计数器。"""
     parts = [
         "<!DOCTYPE html><html><head>",
         f'<meta property="og:url" content="https://www.xiaohongshu.com/explore/{NOTE_ID}" />',
         "</head><body>",
         f'<div id="detail-desc" class="desc"><span class="note-text">{body}</span></div>',
     ]
+    if declared is not None:
+        # 平台真实形态：<div class="fraction">1/26</div>，分母就是总张数
+        parts.append(f'<div data-v-49df7ae2="" class="fraction">1/{declared}</div>')
     if image_list is not None:
         # 平台真实形态：`/` 在 JSON 里被转义成 \u002F
         raw = json.dumps(image_list, ensure_ascii=False).replace("/", "\\u002F")
@@ -275,6 +278,65 @@ class LayerRelationTest(unittest.TestCase):
         self.assertIn("篇幅：", text)
         self.assertIn("与正文层的关系：", text)
         self.assertIn("另写一篇", text)
+
+
+class DeclaredTotalTest(unittest.TestCase):
+    """平台自己给的「共几张」，用来区分「我们漏了」和「原始数据就这么多」。
+
+    实测 5 篇详情页全部带 `<div class="fraction">1/26</div>`，分母与我们绑到的张数一致。
+    这个字段的价值只在**不一致**时体现——那时它是唯一的失败信号。
+    """
+
+    def test_declared_total_is_read_from_page_not_from_our_count(self):
+        html = detail_html([{"fileId": "spectrum/a", "urlDefault": "http://x/spectrum/a!webp_3"}],
+                           declared=9)
+        self.assertEqual(img.declared_total(html), 9)
+
+    def test_missing_counter_yields_none_not_a_guess(self):
+        """没有计数器就写 None：不许用我们自己绑到的张数冒充「平台说就这么多」。"""
+        self.assertIsNone(img.declared_total(detail_html([])))
+
+    def test_bound_fewer_than_declared_is_flagged_incomplete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "测试 - 小红书.html"
+            files_dir = root / "测试 - 小红书_files"
+            files_dir.mkdir()
+            (files_dir / "1040g0k0abc!nd_dlt_wlteh_webp_3").write_bytes(b"x")
+            archive.write_text(
+                detail_html([{"fileId": "spectrum/abc",
+                              "urlDefault": "http://x/spectrum/1040g0k0abc!nd_dlt_wlteh_webp_3"}],
+                            declared=8),
+                encoding="utf-8",
+            )
+            note = img.collect(archive, {}, archive.read_text(encoding="utf-8"), search_root=root)
+            self.assertEqual(note.total, 1)
+            self.assertEqual(note.declared, 8)
+            self.assertTrue(note.incomplete)
+
+    def test_bound_all_declared_is_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "测试 - 小红书.html"
+            files_dir = root / "测试 - 小红书_files"
+            files_dir.mkdir()
+            (files_dir / "1040g0k0abc!nd_dlt_wlteh_webp_3").write_bytes(b"x")
+            archive.write_text(
+                detail_html([{"fileId": "spectrum/abc",
+                              "urlDefault": "http://x/spectrum/1040g0k0abc!nd_dlt_wlteh_webp_3"}],
+                            declared=1),
+                encoding="utf-8",
+            )
+            note = img.collect(archive, {}, archive.read_text(encoding="utf-8"), search_root=root)
+            self.assertFalse(note.incomplete)
+
+    def test_render_text_states_completeness(self):
+        note = img.NoteImages(note_id=NOTE_ID, source="raw_imageList", declared=9,
+                              images=[img.NoteImage(index=1, url="", file_id="", local=Path("a"))])
+        results = {1: img.OcrResult(lines=("内容" * 10,), chars=20, mean_score=0.99)}
+        text = img.render_text(note, results, {"title": "标题", "body_chars": 100, "body_text": "正文" * 20})
+        self.assertIn("平台声明 9", text)
+        self.assertIn("不全", text)
 
 
 class BodyThinTest(unittest.TestCase):

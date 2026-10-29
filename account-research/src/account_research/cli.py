@@ -152,6 +152,8 @@ def build_parser() -> argparse.ArgumentParser:
     links.add_argument("--limit", type=int, default=0)
     links.add_argument("--no-tokens", action="store_true",
                        help="不读存档里的 xsec_token（生成的链接很可能 404）")
+    links.add_argument("--text-dir", default="",
+                       help="正文归档目录；默认 account/notes-text（测试用临时目录）")
     links.add_argument("--out", default="", help="写成 markdown 文件；默认只打印")
     links.set_defaults(func=cmd_links)
 
@@ -499,7 +501,7 @@ def cmd_links(args: argparse.Namespace) -> int:
     打不开时最稳的路仍然是**回主页点进那一篇**——那条路径永远带新鲜 token。
     """
     rows = _merged_notes(args)
-    text_dir = REPO_ROOT / "account" / TEXT_DIR
+    text_dir = _image_text_root(args)
     tokens = build_token_index([REPO_ROOT / "account"]) if not args.no_tokens else {}
     pending: list[tuple[dict[str, Any], bool, str]] = []
     for row in rows:
@@ -507,8 +509,10 @@ def cmd_links(args: argparse.Namespace) -> int:
         if not note_id:
             continue
         has_text = (text_dir / f"{note_id}.txt").is_file()
-        # 数字齐全就不用再打开页面了（正文有没有是另一回事，但页面只多给正文）
-        if not _missing_fields(row):
+        # 🔧 2026-10-29 改：原来「数字齐全就不再列出来」，理由是「页面只多给正文」。
+        # 那个理由现在反了——正文（尤其写在图上的那部分）才是要分析的东西，
+        # 数字齐了但没正文的篇目**恰恰最该补**。实测漏了 2 篇藏/评齐全却没有正文的。
+        if not _missing_fields(row) and has_text:
             continue
         pending.append((row, has_text, tokens.get(note_id, "")))
     pending.sort(key=lambda triple: -int(str(triple[0].get("likes") or 0)))
@@ -519,6 +523,10 @@ def cmd_links(args: argparse.Namespace) -> int:
         return 0
 
     with_token = sum(1 for _, _, token in pending if token)
+    need_body = sum(1 for _, has_text, _ in pending if not has_text)
+    numbers_done_no_body = sum(
+        1 for row, has_text, _ in pending if not has_text and not _missing_fields(row)
+    )
     lines = [
         "# 待采详情页清单",
         "",
@@ -527,8 +535,11 @@ def cmd_links(args: argparse.Namespace) -> int:
         "→ 全部存完丢进 `account/inbox/` → `python account-research/ar.py ingest`"
         " → `python account-research/ar.py images --ocr`",
         "",
-        f"共 {len(pending)} 篇；标「已有正文」的只缺赞/藏/评。"
-        f"链接带 token：{with_token}/{len(pending)}。",
+        f"共 {len(pending)} 篇。其中 {need_body} 篇还没有正文"
+        + (f"（含 {numbers_done_no_body} 篇赞/藏/评已齐、只缺正文的——"
+           f"旧逻辑会把这些漏掉，理由是「数字齐了就不用打开」，而正文恰恰是要分析的东西）"
+           if numbers_done_no_body else "")
+        + f"。链接带 token：{with_token}/{len(pending)}。",
         "",
         "> ⚠️ token 是从你已保存的存档里读出来的，**会过期**。若某篇打开后跳到 404"
         "（error_code=300031），说明 token 失效——回该账号主页点进那篇即可（永远带新 token）。",
@@ -539,7 +550,15 @@ def cmd_links(args: argparse.Namespace) -> int:
     for index, (row, has_text, token) in enumerate(pending, start=1):
         note_id = str(row.get("note_id"))
         title = str(row.get("title") or "(无标题)").replace("|", "／")
-        status = "已有正文，缺数字" if has_text else ("未采" if token else "未采（无 token）")
+        lacks = _missing_fields(row)
+        if has_text and lacks:
+            status = "已有正文，缺数字"
+        elif has_text:
+            status = "已齐"
+        elif lacks:
+            status = "未采" + ("（无 token）" if not token else "")
+        else:
+            status = "数字齐，**缺正文**"
         likes = str(row.get("likes") or "?")
         lines.append(
             f"| {index} | {likes} | {title} | {status} | {note_url(note_id, token)} |"
@@ -828,8 +847,12 @@ def cmd_images(args: argparse.Namespace) -> int:
     print("图片只从本地 `_files/` 读，不发任何网络请求；图不会进模型上下文。\n")
     for row in rows:
         note = row["note"]
-        print(f"{note.note_id} | 图 {note.total:>2}（本地 {note.local}）| 正文 {row['text_chars']} 字"
-              f" | {row['path'].name[:36]}")
+        declared = "" if note.declared is None else f" / 平台声明 {note.declared}"
+        print(f"{note.note_id} | 图 {note.total:>2}（本地 {note.local}{declared}）"
+              f"| 正文 {row['text_chars']} 字 | {row['path'].name[:36]}")
+        if note.incomplete:
+            print(f"   ⚠️ 绑到的张数少于平台声明（{note.total} < {note.declared}）：**我们漏了图**，"
+                  f"要修解析，别把这份当成完整正文")
         if note.missing():
             print(f"   ⬜ 未落到本地：图 {note.missing()[:8]}（这份存档当时可能只选了「仅 HTML」）")
         if note.local == 0:
