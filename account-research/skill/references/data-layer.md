@@ -55,6 +55,7 @@ python account-research/ar.py quota                         # 今日额度（主
 python account-research/ar.py gaps       [--limit N]        # 缺口清单（缺藏/评，按点赞降序）
 python account-research/ar.py links      [--limit N] [--out todo.md]   # 待采详情页的可点击链接清单
 python account-research/ar.py parse-detail <存档...>       # 详情页 HTML → 赞/藏/评/时长 + 正文归档
+python account-research/ar.py images     [--ocr] [--limit N]  # 图片通道：正文图清单 → OCR 成 <note_id>.images.txt
 python account-research/ar.py fill       [--limit N]        # 逐篇口播补数（交互式，一次提交）
 python account-research/ar.py parse      <存档...> --on 2026-10-22   # 主页存档 → accounts / notes
 python account-research/ar.py record     --file detail.json --on 2026-10-22   # 详情页人工补数（藏/评/时长）
@@ -80,7 +81,7 @@ python account-research/ar.py selftest                     # 对真实存档跑�
 | 类型 | 判据（均有真实存档实证） | 处置 |
 |---|---|---|
 | `profile` | `user.userPageData.basicInfo.nickname` 非空 | ✅ 可解析 |
-| `note_detail` | `note.noteDetailMap` 非空 | ⏭ v1 不解析（CSR 存下来是空壳，改用 Ctrl+A 复制文本） |
+| `note_detail` | `note.noteDetailMap` 非空 **或 `og:url` 指向 `/explore/<id>`** | ✅ 走详情通道（`parse-detail` / `ingest`）；⚠️ 从主页点开弹层再 Ctrl+S 的存档 `og:url` 仍是主页，会被判成 profile |
 | `search_page` | `<title>` 含「搜索」 | ⏭ 内容是他人笔记 |
 | `home_feed` | `feed.feeds` 非空 | ⏭ 推荐流，非账号主页 |
 | `empty_skeleton` | 三者皆空 | ⏭ 页面没渲染出来 |
@@ -92,3 +93,19 @@ python account-research/ar.py selftest                     # 对真实存档跑�
 - 目标 id 来源：`noteQueries[].userId` ∪ `noteCard.user.userId`
 - 采集者 id：`user.userInfo.userId` —— **这是采集者本人，不是目标**（v0.2 曾把它的简介、小红书号当成目标账号的）
 - 规则：卡片作者 ≠ 目标 → 丢弃并留证据；目标 id 与采集者 id 相同 → 提示「采集者即目标，『对标』语义不成立」
+
+## 7. 图片通道（图文笔记的内容层）
+
+`notes` 表存的是**文字层**的数字与标题；小红书大量笔记的完整内容排版在图上。图片通道单独一层，**不进 CSV**，落文本文件：
+
+| 产出 | 内容 | 谁写 |
+|---|---|---|
+| `account/notes-text/<note_id>.txt` | 正文层（`#detail-desc`），作者自己压过的版本 | `parse-detail` / `ingest` |
+| `account/notes-text/<note_id>.images.txt` | 图上文字，一张图一段，带质量标记 | `images --ocr` |
+
+**三条硬规则**：
+1. 图与笔记的 join key = **URL 末段**（`imageList[].fileId` 带 `spectrum/` / `notes_pre_post/` 前缀，与 `_files/` 文件名对不上）；
+2. 图片信息三级兜底：`noteDetailMap` → HTML 里的 `"imageList":[…]` → DOM 的 `data-swiper-slide-index`（**不能整段扫 `<img>`**，会把推荐流封面算进来）；
+3. **图字节永不进模型上下文**（R7）：只读本地文件跑 OCR，把字落成 txt。一张 1440×2400 的笔记图约 4.3k tokens，24 张就 10 万级。
+
+详见 [../../docs/图片内容通道.md](../../docs/图片内容通道.md)。

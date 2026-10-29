@@ -17,6 +17,16 @@ from typing import Any, Sequence
 from . import schema, store
 from .board import render_board
 from .detail import extract_detail
+from .images import (
+    OcrUnavailable,
+    body_chars,
+    collect as collect_images,
+    image_dominance,
+    image_text_path,
+    load_engine,
+    ocr_file,
+    render_text,
+)
 from .initialstate import REJECT_REASONS, ArchiveError, iter_note_cards, open_archive
 from .parser import parse_account, parse_blocks, parse_notes
 from .stats import summarize
@@ -105,6 +115,16 @@ def build_parser() -> argparse.ArgumentParser:
     detail.add_argument("--data", default=str(DEFAULT_DATA))
     detail.add_argument("--ledger", default=str(DEFAULT_LEDGER))
     detail.set_defaults(func=cmd_parse_detail)
+
+    images = sub.add_parser("images", help="图片通道：列出存档里的正文图，并把图上的文字 OCR 成文件")
+    images.add_argument("files", nargs="*", help="详情页 HTML；省略=扫描 --root 下所有存档")
+    images.add_argument("--root", default=str(REPO_ROOT / "account"),
+                        help="扫描根目录（也是救回孤立 _files 的搜索范围）")
+    images.add_argument("--ocr", action="store_true", help="对本地图片跑 OCR（需 rapidocr-onnxruntime）")
+    images.add_argument("--limit", type=int, default=0, help="只处理前 N 篇（0=全部）")
+    images.add_argument("--text-dir", default="", help="OCR 文本输出目录；默认 account/notes-text")
+    images.add_argument("--data", default=str(DEFAULT_DATA))
+    images.set_defaults(func=cmd_images)
 
     gaps = sub.add_parser("gaps", help="列出缺藏/评/分享的篇目，按该补的价值排序")
     gaps.add_argument("--data", default=str(DEFAULT_DATA))
@@ -683,12 +703,6 @@ def cmd_parse_detail(args: argparse.Namespace) -> int:
 
 
 def _archive_body(fields: Any) -> str:
-    """正文落本地文件（长文本不进 CSV）。目录在 account/ 下，随存档一起被 gitignore。
-
-    **必须保留分段**：小红书的正文用裸换行分段，压平成一整块之后，
-    「他分了几段 / 钩子在第几段 / 有没有空行隔断」这些结构证据就没了——
-    而那正是爆款拆解要看的东西。段落之间用空行写，读起来也像原文。
-    """
     if not fields.note_id or not fields.body:
         return ""
     target_dir = REPO_ROOT / "account" / "notes-text"
@@ -703,6 +717,106 @@ def _archive_body(fields: Any) -> str:
     )
     target.write_text(header + "\n\n".join(paragraphs), encoding="utf-8")
     return str(target.relative_to(REPO_ROOT))
+
+
+TEXT_DIR = "notes-text"
+
+
+def _detail_archives(files: list[str], root: Path) -> list[Path]:
+    """列出要处理的详情页存档：显式给的文件优先，否则扫 root 下所有 HTML（跳过 saved_resource）。"""
+    if files:
+        return [Path(raw) for raw in files if Path(raw).is_file()]
+    if not root.is_dir():
+        return []
+    return sorted(
+        path for path in root.rglob("*.html")
+        if not path.name.startswith("saved_resource")
+    )
+
+
+def cmd_images(args: argparse.Namespace) -> int:
+    """图片通道：正文写在图里的笔记，把字取出来落成文件。
+
+    回答的是那句「小红书很多内容在图片里，保存 HTML 有解析图片内容吗」：
+    **图默认已经存在本机了**（Chrome「网页，完整」会把图写进 `_files/`），
+    缺的不是数据，是一条把图和笔记对上、并把字取出来的通道。
+
+    两条硬边界（违反就是 R2 / 错数据）：
+    1. 只读本地文件，**一个网络请求都不发**——图是人的保存动作带下来的；
+    2. **图片绝不进模型上下文**：一张 1440×2400 的笔记图约 4k tokens，
+       一篇 24 张就是 10 万级，那正是上下文 400 的直接来源。这里只产出 txt。
+    """
+    root = Path(args.root)
+    archives = _detail_archives(args.files, root)
+    if not archives:
+        print(f"没有可处理的 HTML：{root}")
+        return 1
+    text_root = Path(args.text_dir) if args.text_dir else REPO_ROOT / "account" / TEXT_DIR
+    engine = None
+    if args.ocr:
+        try:
+            engine = load_engine()
+        except OcrUnavailable as exc:
+            print(f"❌ {exc}")
+            return 1
+
+    rows: list[dict[str, Any]] = []
+    for path in archives:
+        html = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            archive = open_archive(path)
+        except ArchiveError:
+            archive = None
+        if archive is not None and archive.kind != "note_detail":
+            continue
+        note = collect_images(path, archive.state if archive else {}, html, search_root=root)
+        if not note.note_id:
+            continue
+        rows.append({
+            "path": path, "note": note, "html": html,
+            "text_chars": body_chars(html),
+        })
+    if not rows:
+        print("没有识别到详情页存档（og:url 里要有 /explore/<id>）。")
+        return 1
+    rows.sort(key=lambda row: -row["note"].total)
+    if args.limit:
+        rows = rows[: args.limit]
+
+    print(f"=== 图片通道：{len(rows)} 篇详情 ===")
+    print("图片只从本地 `_files/` 读，不发任何网络请求；图不会进模型上下文。\n")
+    for row in rows:
+        note = row["note"]
+        print(f"{note.note_id} | 图 {note.total:>2}（本地 {note.local}）| 正文 {row['text_chars']} 字"
+              f" | {row['path'].name[:36]}")
+        if note.missing():
+            print(f"   ⬜ 未落到本地：图 {note.missing()[:8]}（这份存档当时可能只选了「仅 HTML」）")
+        if note.local == 0:
+            print("   ⬜ 这批一张图都没有：重新 Ctrl+S 时选「网页，完整」才带图")
+            continue
+        if engine is None:
+            continue
+        results = {}
+        for image in note.images:
+            if image.local:
+                results[image.index] = ocr_file(engine, image.local)
+        target = image_text_path(text_root, note.note_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        detail = extract_detail(row["html"])
+        target.write_text(
+            render_text(note, results, {"title": detail.title, "body_chars": row["text_chars"]}),
+            encoding="utf-8",
+        )
+        low = [index for index, result in results.items() if result.low_quality]
+        image_chars = sum(result.chars for result in results.values())
+        shown = target.relative_to(REPO_ROOT) if target.is_relative_to(REPO_ROOT) else target
+        print(f"   ✅ OCR {len(results)} 张 / {image_chars} 字 → {shown}")
+        print(f"   {image_dominance(image_chars, row['text_chars'])}")
+        if low:
+            print(f"   ⚠️ 低质量图 {low}：引用前必须看原图（OCR 置信 <0.80 或字数 <10）")
+    if engine is None:
+        print("\n提示：加 `--ocr` 才会把图上的字取出来（需 `python -m pip install rapidocr-onnxruntime`）。")
+    return 0
 
 
 def cmd_quota(args: argparse.Namespace) -> int:
@@ -808,9 +922,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     merged = _merged_notes(args)
     text_dir = REPO_ROOT / "account" / TEXT_DIR
     with_text = sum(1 for row in merged if (text_dir / f"{row.get('note_id')}.txt").is_file())
+    with_images_text = sum(1 for row in merged if image_text_path(text_dir, str(row.get("note_id"))).is_file())
     missing = [row for row in merged if _missing_fields(row)]
     print(f"账号 {len(accounts)} 个 | 笔记 {len(merged)} 篇（原始 {len(notes)} 行，含多渠道观测）")
-    print(f"有正文归档 {with_text} 篇 | 藏/评齐全 {len(merged) - len(missing)} 篇 | 待补 {len(missing)} 篇")
+    print(f"有正文归档 {with_text} 篇 | 有图上文字 {with_images_text} 篇"
+          f" | 藏/评齐全 {len(merged) - len(missing)} 篇 | 待补 {len(missing)} 篇")
     print()
     inbox = DEFAULT_INBOX
     pending_files = [p for p in inbox.iterdir() if p.is_file()] if inbox.is_dir() else []
