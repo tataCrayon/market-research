@@ -39,6 +39,24 @@ class TestSingleFileIngest(unittest.TestCase):
         self.assertEqual(len(store.read_table(self.data, "accounts")), 1)
         self.assertFalse(self.single.exists())          # 已归档
 
+    def test_ingest_moves_files_dir_along_with_html(self):
+        """`_files/` 必须跟着 HTML 一起走。
+
+        实测踩过：Kimi 那篇的 HTML 进了 `processed/`，26 张图却留在 `account/` 根目录成孤儿。
+        当时靠 `locate_files_dir` 反查救了回来——**但那是补丁，不该是常态**：
+        孤儿目录一旦被挪走或删掉，图片通道就直接失效，而 HTML 看起来完全正常。
+        """
+        files_dir = self.work / "一篇_files"
+        files_dir.mkdir()
+        (files_dir / "1040g0k0abc!nd_dft_wlteh_webp_3").write_bytes(b"fake-image")
+        code = main(["ingest", str(self.single), "--on", "2026-10-27", "--data", str(self.data),
+                     "--ledger", "", "--text-dir", str(self.text_dir)])
+        self.assertEqual(code, 0)
+        self.assertFalse(files_dir.exists(), "_files 应已搬走，不留孤儿")
+        archived = list((self.work / "processed").rglob("一篇_files"))
+        self.assertEqual(len(archived), 1, "应搬到 processed/<日期>/ 下跟 HTML 同层")
+        self.assertTrue((archived[0] / "1040g0k0abc!nd_dft_wlteh_webp_3").is_file())
+
     def test_status_reports_next_step(self):
         main(["ingest", str(self.single), "--on", "2026-10-27", "--data", str(self.data),
               "--ledger", "", "--text-dir", str(self.text_dir)])

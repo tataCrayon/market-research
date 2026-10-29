@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from account_research.detail import body_paragraphs, extract_detail  # noqa: E402
+from account_research.detail import body_paragraphs, extract_detail, is_list_item  # noqa: E402
 
 # 真实存档里的形状：段落之间是 `\n\t\n`（换行 + 缩进空白 + 换行），不是 <p>
 REAL_SHAPE = """<span class="note-text">
@@ -74,6 +74,37 @@ class TestBodyParagraphs(unittest.TestCase):
         fields = extract_detail(DESC_HTML)
         self.assertGreater(len(fields.paragraphs), 1, "压平成一整块就失去了结构证据")
         self.assertTrue(fields.paragraphs[0].startswith("刷视频时看到个观点"))
+
+
+class TestListItems(unittest.TestCase):
+    """项目符号必须各自成段。
+
+    实测（2026-10-29）：那篇 110 赞的笔记正文层有 4 条项目符号，
+    被合并成了一段——「8 段 + 4 条列表」这个结构证据丢了一半。
+    而**清单式说明正是那篇的骨架**（正文里说「接了一点点自动化任务做演示：」然后逐条列）。
+    把它们压成一段，会让人以为作者只是堆了一句话。
+    """
+
+    def test_bullets_split_into_separate_paragraphs(self):
+        raw = "演示：\n\t\n- 甲。\n- 乙。\n- 丙。\n\t\n结束。"
+        paras = body_paragraphs(raw)
+        self.assertEqual(len(paras), 5, f"应为 5 段（1 引 + 3 列表 + 1 收），实际 {paras}")
+        self.assertEqual([p for p in paras if is_list_item(p)], ["- 甲。", "- 乙。", "- 丙。"])
+
+    def test_various_bullet_styles(self):
+        raw = "- 甲\n• 乙\n· 丙\n1. 丁\n2、戊\n3) 己"
+        paras = body_paragraphs(raw)
+        self.assertEqual(len(paras), 6, f"六种符号都要认，实际 {paras}")
+
+    def test_plain_wrapped_lines_still_merge(self):
+        """普通折行不能因为「看起来像列表」被切开——它没有项目符号。"""
+        paras = body_paragraphs("第一行\n第二行\n- 真列表")
+        self.assertEqual(paras, ("第一行 第二行", "- 真列表"))
+
+    def test_negative_number_is_not_a_bullet(self):
+        """「2026.」是年份不是编号；行内出现的「-」也不是项目符号。"""
+        self.assertFalse(is_list_item("2026 年发生了变化"))
+        self.assertFalse(is_list_item("这件事 - 说起来 - 很复杂"))
 
 
 if __name__ == "__main__":

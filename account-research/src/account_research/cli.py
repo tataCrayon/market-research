@@ -531,7 +531,7 @@ def cmd_links(args: argparse.Namespace) -> int:
         "# 待采详情页清单",
         "",
         "用法：**右键链接 → 在新标签页中打开**（不要从主页点开弹层）→ 等加载完 →"
-        " Ctrl+S 选「**网页，完整**」（选「仅 HTML」会丢掉图，而图文笔记的正文常在图上）",
+        " Ctrl+S 选「**网页，全部**」（选「仅 HTML」会丢掉图，而图文笔记的正文常在图上）",
         "→ 全部存完丢进 `account/inbox/` → `python account-research/ar.py ingest`"
         " → `python account-research/ar.py images --ocr`",
         "",
@@ -683,12 +683,29 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
     archive_dir = (roots[0] if roots[0].is_dir() else roots[0].parent) / "processed" / args.on
     archive_dir.mkdir(parents=True, exist_ok=True)
+    moved_dirs = 0
     for path in handled:
         target = archive_dir / path.name
         if target.exists():
             target = archive_dir / f"{path.stem}-{_stamp()}{path.suffix}"
+        # ⚠️ 必须把同名 `<名字>_files/` 一起搬走。
+        # Chrome 的「网页，全部」= HTML + `_files/` 两件套；只搬 HTML 会把图留成孤儿
+        # （实测：Kimi 那篇的 HTML 进了 processed/，26 张图一直躺在 account/ 根目录，
+        #  靠 locate_files_dir 反查才救回来——能救，但那是补丁，不该是常态）。
+        files_dir = path.with_name(f"{path.stem}_files")
         path.replace(target)
+        if files_dir.is_dir():
+            files_target = target.with_name(f"{target.stem}_files")
+            if files_target.exists():
+                files_target = target.with_name(f"{target.stem}-{_stamp()}_files")
+            files_dir.replace(files_target)
+            moved_dirs += 1
     print(f"\n已归档 {len(handled)} 个文件 → {archive_dir}")
+    if moved_dirs:
+        print(f"连同 {moved_dirs} 个 `_files/` 目录一起搬走（图跟着 HTML 走，不留孤儿）")
+    elif any(path.suffix.lower() in (".html", ".htm") for path in handled):
+        print("⚠️ 这次没有 `_files/` 跟着搬：如果这些是详情页，图可能没存下来"
+              "（Ctrl+S 要选「网页，全部」，不是「仅 HTML」）")
     return 0
 
 
@@ -798,7 +815,7 @@ def cmd_images(args: argparse.Namespace) -> int:
     """图片通道：正文写在图里的笔记，把字取出来落成文件。
 
     回答的是那句「小红书很多内容在图片里，保存 HTML 有解析图片内容吗」：
-    **图默认已经存在本机了**（Chrome「网页，完整」会把图写进 `_files/`），
+    **图默认已经存在本机了**（Chrome「网页，全部」会把图写进 `_files/`），
     缺的不是数据，是一条把图和笔记对上、并把字取出来的通道。
 
     两条硬边界（违反就是 R2 / 错数据）：
@@ -856,7 +873,7 @@ def cmd_images(args: argparse.Namespace) -> int:
         if note.missing():
             print(f"   ⬜ 未落到本地：图 {note.missing()[:8]}（这份存档当时可能只选了「仅 HTML」）")
         if note.local == 0:
-            print("   ⬜ 这批一张图都没有：重新 Ctrl+S 时选「网页，完整」才带图")
+            print("   ⬜ 这批一张图都没有：重新 Ctrl+S 时选「网页，全部」才带图")
             continue
         if engine is None:
             continue

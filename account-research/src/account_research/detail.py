@@ -108,6 +108,33 @@ def _text(raw: str) -> str:
 # 结构分析（看他分几段、钩子在第几段）就彻底失效。
 BLANK_LINE_RE = re.compile(r"[ \t\u3000]*\n[ \t\u3000]*\n[ \t\u3000]*")
 SINGLE_NL_RE = re.compile(r"[ \t\u3000]*\n[ \t\u3000]*")
+# 项目符号行：`- xxx` / `• xxx` / `· xxx` / `1. xxx`。
+# **它们必须各自成段**：实测那篇 110 赞的笔记，4 条项目符号被合并成了一段
+# （「- 左边每个项目… - 中间玻璃圆顶… - 右边是两个 Agent… - 每个真实任务…」），
+# 于是「8 段 + 4 条列表」这个结构证据丢了一半——而清单式说明正是那篇的骨架。
+LIST_ITEM_RE = re.compile(r"^\s*(?:[-•·*]|\d{1,2}[.、)])\s+")
+
+
+def is_list_item(paragraph: str) -> bool:
+    """这一段是不是项目符号。分不开「正文段」和「清单项」就没法数他的结构。"""
+    return bool(LIST_ITEM_RE.match(paragraph))
+
+
+def _split_block(block: str) -> list[str]:
+    """一个空行块内部：普通折行要合并，项目符号行要各自独立。"""
+    out: list[str] = []
+    buffer: list[str] = []
+    for line in SINGLE_NL_RE.split(block):
+        if LIST_ITEM_RE.match(line):
+            if buffer:
+                out.append(" ".join(buffer))
+                buffer = []
+            out.append(line.strip())
+        else:
+            buffer.append(line)
+    if buffer:
+        out.append(" ".join(buffer))
+    return [WS_RE.sub(" ", part).strip() for part in out]
 
 
 def body_paragraphs(raw_desc: str) -> tuple[str, ...]:
@@ -116,9 +143,9 @@ def body_paragraphs(raw_desc: str) -> tuple[str, ...]:
     # 半截标签：调用方可能先用别的正则摘掉 <a id="hash-tag">…</a>，只留下一个没有 '>' 的 `<a`，
     # TAG_STRIP_RE 要求成对尖括号因此漏掉它，最后会变成一个只含 `<a` 的假段落。
     text = RESIDUAL_TAG_RE.sub("", text)
-    text = BLANK_LINE_RE.sub("\x00", text)
-    text = SINGLE_NL_RE.sub(" ", text)
-    chunks = [WS_RE.sub(" ", part).strip() for part in text.split("\x00")]
+    chunks: list[str] = []
+    for block in BLANK_LINE_RE.split(text):
+        chunks.extend(_split_block(block))
     return tuple(chunk for chunk in chunks if chunk)
 
 
