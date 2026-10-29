@@ -996,9 +996,16 @@ def cmd_status(args: argparse.Namespace) -> int:
     with_text = sum(1 for row in merged if (text_dir / f"{row.get('note_id')}.txt").is_file())
     with_images_text = sum(1 for row in merged if image_text_path(text_dir, str(row.get("note_id"))).is_file())
     missing = [row for row in merged if _missing_fields(row)]
+    # 🔧 「数字齐」不等于「能分析」：正文才是要读的东西。这 2 类缺口分开报，
+    # 否则 status 会显示「待补 60」而实际要打开的是 62 篇（差在 2 篇有数字没正文的）。
+    no_body = [row for row in merged if not (text_dir / f"{row.get('note_id')}.txt").is_file()]
+    numbers_done_no_body = [row for row in no_body if not _missing_fields(row)]
+    need_open = len({row.get("note_id") for row in missing} | {row.get("note_id") for row in no_body})
     print(f"账号 {len(accounts)} 个 | 笔记 {len(merged)} 篇（原始 {len(notes)} 行，含多渠道观测）")
     print(f"有正文归档 {with_text} 篇 | 有图上文字 {with_images_text} 篇"
-          f" | 藏/评齐全 {len(merged) - len(missing)} 篇 | 待补 {len(missing)} 篇")
+          f" | 藏/评齐全 {len(merged) - len(missing)} 篇 | 缺藏/评 {len(missing)} 篇"
+          f" | 缺正文 {len(no_body)} 篇（其中 {len(numbers_done_no_body)} 篇数字已齐）")
+    print(f"→ 实际还要打开 {need_open} 篇详情页（`ar links` 会把这批都列出来）")
     print()
     inbox = DEFAULT_INBOX
     pending_files = [p for p in inbox.iterdir() if p.is_file()] if inbox.is_dir() else []

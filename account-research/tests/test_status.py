@@ -57,6 +57,22 @@ class TestSingleFileIngest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("ar ingest", buffer.getvalue())
 
+    def test_status_separates_missing_body_from_missing_numbers(self):
+        """「藏/评齐」不等于「能分析」。
+
+        实测踩过：status 只报「待补 60 篇」，而实际要打开 62 篇——
+        差在 2 篇数字齐、却没正文的。这两个缺口混成一个数字，
+        会让人以为「数字齐的那批已经完事了」，于是永远不去补正文。
+        """
+        main(["ingest", str(self.single), "--on", "2026-10-27", "--data", str(self.data),
+              "--ledger", "", "--text-dir", str(self.text_dir)])
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            main(["status", "--data", str(self.data)])
+        output = buffer.getvalue()
+        self.assertIn("缺正文", output)
+        self.assertIn("实际还要打开", output)
+
 
 if __name__ == "__main__":
     unittest.main()
