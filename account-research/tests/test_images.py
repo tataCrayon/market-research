@@ -234,7 +234,7 @@ class LayerRelationTest(unittest.TestCase):
     """两份文本的关系要按重叠判，不能按字数倍数猜。
 
     实测数据把这四种情形都撞出来了：
-    - 卡兹克 4581：46 倍字数差，重叠 2.7% → 另写的导语
+    - 卡兹克 4581：44 倍字数差，重叠 2.7% → 另写的导语
     - 知新 3259：2.1 倍，重叠 95.6% → 同一篇（图上只是重新排版带小标题）
     - 知新 510：1.4 倍，重叠 61% → 部分重叠
     **只看倍数会把 3259 误判成「压缩版」，把 4581 误判成「删减版」——两个都错。**
@@ -253,7 +253,7 @@ class LayerRelationTest(unittest.TestCase):
         self.assertIn("另写一篇", img.layer_relation(body, image))
 
     def test_big_char_ratio_does_not_imply_rewrite(self):
-        """字数差 46 倍、内容却完全相同的极端情形：倍数不能当判据。"""
+        """字数差 44 倍、内容却完全相同的极端情形：倍数不能当判据。"""
         body = "同一段正文内容" * 20
         image = body * 46
         self.assertGreater(img.overlap_ratio(body, image), 0.99)
