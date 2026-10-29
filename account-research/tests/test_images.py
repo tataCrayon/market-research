@@ -227,6 +227,56 @@ class OcrQualityTest(unittest.TestCase):
             img.load_engine = original
 
 
+class LayerRelationTest(unittest.TestCase):
+    """两份文本的关系要按重叠判，不能按字数倍数猜。
+
+    实测数据把这四种情形都撞出来了：
+    - 卡兹克 4581：46 倍字数差，重叠 2.7% → 另写的导语
+    - 知新 3259：2.1 倍，重叠 95.6% → 同一篇（图上只是重新排版带小标题）
+    - 知新 510：1.4 倍，重叠 61% → 部分重叠
+    **只看倍数会把 3259 误判成「压缩版」，把 4581 误判成「删减版」——两个都错。**
+    """
+
+    def test_same_article_detected_by_high_overlap(self):
+        body = "看完马斯克最新的那场访谈就一个感受他想得太通透了" * 4
+        image = "1 " + body + "\n2 " + body
+        self.assertGreater(img.overlap_ratio(body, image), 0.9)
+        self.assertIn("同一篇", img.layer_relation(body, image))
+
+    def test_rewritten_teaser_detected_by_low_overlap(self):
+        body = "这篇文章我从昨天写到了今天凌晨六点十五分" * 3
+        image = "昨天早上可能会是人类时代的一个分水岭" * 6
+        self.assertLess(img.overlap_ratio(body, image), 0.1)
+        self.assertIn("另写一篇", img.layer_relation(body, image))
+
+    def test_big_char_ratio_does_not_imply_rewrite(self):
+        """字数差 46 倍、内容却完全相同的极端情形：倍数不能当判据。"""
+        body = "同一段正文内容" * 20
+        image = body * 46
+        self.assertGreater(img.overlap_ratio(body, image), 0.99)
+        self.assertIn("同一篇", img.layer_relation(body, image))
+
+    def test_whitespace_and_punctuation_are_ignored(self):
+        body = "普通人如何应对AI时代的变化"
+        image = "普 通 人 如 何 应 对 A I 时 代 的 变 化"
+        self.assertGreater(img.overlap_ratio(body, image), 0.99)
+
+    def test_empty_side_reports_which_layer_is_empty(self):
+        self.assertIn("图上无可读文字", img.layer_relation("有正文", ""))
+        self.assertIn("正文层空", img.layer_relation("", "有图上文字"))
+
+    def test_render_text_states_relation_not_just_ratio(self):
+        note = img.NoteImages(note_id=NOTE_ID, source="dom_slider", images=[
+            img.NoteImage(index=1, url="", file_id="", local=Path("a!webp_3")),
+        ])
+        results = {1: img.OcrResult(lines=("完全不同的另一段话内容",), chars=10, mean_score=0.99)}
+        text = img.render_text(note, results, {"title": "标题", "body_chars": 300,
+                                               "body_text": "这一段正文字跟图上完全不一样" * 3})
+        self.assertIn("篇幅：", text)
+        self.assertIn("与正文层的关系：", text)
+        self.assertIn("另写一篇", text)
+
+
 class BodyThinTest(unittest.TestCase):
     def test_body_chars_counts_only_desc_paragraphs(self):
         html = detail_html(body="短")

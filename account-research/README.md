@@ -11,7 +11,7 @@
 | `src/account_research/` | **确定性处理层**（Python 标准库，零依赖）：`ar probe/parse/validate/stats/add/selftest`——存档解析、六张表、V1–V8 校验器、统计；`ar images` 图片通道（正文在图上时的取字路径，OCR 依赖可选） | ✅ v0.1.0 已对真实存档跑通（32 篇 / 置顶 2 / 样本 30）；图片通道对 5 篇真实详情页跑通（5–26 图/篇） |
 | `agent/` | **Agent 契约**（八项必填 + 动作自治上限 + 5 条评估） | 草稿（缺「备份联系人」；契约见其文件） |
 | `web/` | **副端 PC Web 工具**：纯客户端解析（File API，数据不出浏览器）+ 静态托管 | 占位，未启动（触发条件见其 README） |
-| `tests/` | 验收测试：143 个单测（合成 fixture）+ `ar selftest` 真实存档回归 | ✅ 全绿 |
+| `tests/` | 验收测试：150 个单测（合成 fixture）+ `ar selftest` 真实存档回归 | ✅ 全绿 |
 | `docs/` | 产品工程文档：方向卡、PRD、case 复盘、Agent 运行记录 | 见其 README |
 | `data/` | 结构化数据（六张 CSV，gitignore，仅本地） | —— |
 | `../account/` | 采集原始存档（仓库根，gitignore，仅本地） | 本地在（卡兹克 4 份 + 3 份无效存档） |

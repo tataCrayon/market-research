@@ -20,9 +20,11 @@ from .detail import extract_detail
 from .images import (
     OcrUnavailable,
     body_chars,
+    body_text,
     collect as collect_images,
     image_dominance,
     image_text_path,
+    layer_relation,
     load_engine,
     ocr_file,
     render_text,
@@ -843,14 +845,21 @@ def cmd_images(args: argparse.Namespace) -> int:
         target.parent.mkdir(parents=True, exist_ok=True)
         detail = extract_detail(row["html"])
         target.write_text(
-            render_text(note, results, {"title": detail.title, "body_chars": row["text_chars"]}),
+            render_text(note, results, {
+                "title": detail.title,
+                "body_chars": row["text_chars"],
+                "body_text": body_text(row["html"]),
+            }),
             encoding="utf-8",
         )
         low = [index for index, result in results.items() if result.low_quality]
         image_chars = sum(result.chars for result in results.values())
+        image_body = "\n".join("\n".join(result.lines) for result in results.values())
+        relation = layer_relation(body_text(row["html"]), image_body)
         shown = target.relative_to(REPO_ROOT) if target.is_relative_to(REPO_ROOT) else target
         print(f"   ✅ OCR {len(results)} 张 / {image_chars} 字 → {shown}")
-        print(f"   {image_dominance(image_chars, row['text_chars'])}")
+        print(f"   篇幅：{image_dominance(image_chars, row['text_chars'])}")
+        print(f"   关系：{relation}")
         if low:
             print(f"   ⚠️ 低质量图 {low}：引用前必须看原图（OCR 置信 <0.80 或字数 <10）")
     if engine is None:

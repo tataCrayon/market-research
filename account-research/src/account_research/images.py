@@ -36,6 +36,8 @@ DOM_SLIDER_END = "note-scroller"
 SLIDE_INDEX_RE = re.compile(r'data-swiper-slide-index="(\d+)"')
 SLIDE_IMG_RE = re.compile(r'src="(\./[^"]*_files/[^"]+)"')
 URL_KEYS = ("urlDefault", "url", "urlPre")
+# 比重叠时只留中文与字母数字：OCR 会插换行、也会把标点认成别的符号
+NON_WORD_RE = re.compile(r"[^\u4e00-\u9fff\w]")
 
 
 @dataclass(frozen=True)
@@ -404,12 +406,15 @@ def render_text(
     """
     image_chars = sum(result.chars for result in results.values())
     text_chars = int(header.get("body_chars") or 0)
+    image_body = "\n".join("\n".join(result.lines) for result in results.values())
+    relation = layer_relation(str(header.get("body_text") or ""), image_body)
     blocks = [
         f"# {header.get('title') or '(无标题)'}",
         f"# note_id：{note.note_id}",
         f"# 图片数：{note.total}（本地命中 {note.local}）",
         f"# 来源：{note.source} · OCR 引擎：RapidOCR（本机 onnxruntime）",
-        f"# 与正文层的关系：{image_dominance(image_chars, text_chars)}",
+        f"# 篇幅：{image_dominance(image_chars, text_chars)}",
+        f"# 与正文层的关系：{relation}",
         "# 等级：图上文字 ②（原图在本地可复核）/ 段落与版式 ③-a（OCR 换行 ≠ 原作者分段）",
         "# ⚠️ OCR 有误差：置信 <0.80 或字数 <10 的图标了『低质量』，引用前必须看原图",
         "# ⚠️ 正文层（notes-text/<note_id>.txt）与图上文字可能不是同一版：两版都要留，不得互相覆盖",
@@ -447,12 +452,54 @@ def body_chars(html: str) -> int:
     return sum(len(part) for part in body_paragraphs(TAG_RE.sub(" ", match.group(1))))
 
 
-def image_dominance(image_chars: int, text_chars: int, ratio: float = 1.5) -> str:
-    """OCR 出的字 vs 正文层的字 → 这篇的「主载体」是什么。
+def body_text(html: str) -> str:
+    """正文层的纯文本（段落用换行连）。用于和图上文字比重叠。"""
+    match = DESC_RE.search(html)
+    if not match:
+        return ""
+    return "\n".join(body_paragraphs(TAG_RE.sub(" ", match.group(1))))
 
-    实测（2026-10-29）：一篇 5 图的笔记，正文 348 字是**压缩版**，图上 945 字才是完整版——
-    只读正文会漏掉一半内容，而且两句措辞不同（图上是「大家可能有几年时间」，正文是
-    「我们可能只有几年时间」）。所以这不是「有没有正文」的问题，是**两份文本都要**。
+
+def normalize(text: str) -> str:
+    """只留中文与字母数字：OCR 会插换行、标点也会被识别成别的符号，比之前先把这些抹平。"""
+    return NON_WORD_RE.sub("", text)
+
+
+def overlap_ratio(body: str, image_text: str, size: int = 8) -> float:
+    """正文层的 `size` 字滑窗里，有多大比例能在图上文字中找到。
+
+    为什么需要这个：只看「字数倍数」会得出错误结论——实测五种情况并存：
+    卡兹克 4581 是 46 倍但重叠只有 2.7%（**另写的一篇导语**），
+    知新 3259 只有 2.1 倍却是 **95.6%**（**同一篇**，图上只是重新排版带了小标题）。
+    **倍数说明篇幅差异，重叠才说明是不是同一篇文章。**
+    """
+    plain_body, plain_image = normalize(body), normalize(image_text)
+    if len(plain_body) < size or len(plain_image) < size:
+        return 0.0
+    body_grams = {plain_body[i:i + size] for i in range(len(plain_body) - size + 1)}
+    image_grams = {plain_image[i:i + size] for i in range(len(plain_image) - size + 1)}
+    return len(body_grams & image_grams) / len(body_grams)
+
+
+def layer_relation(body: str, image_text: str) -> str:
+    """两份文本的关系。三种情形要分开对待，不能一律说「正文层被砍短了」。"""
+    if not normalize(image_text):
+        return "图上无可读文字（只有正文层）"
+    if not normalize(body):
+        return "正文层空 → 内容全在图里"
+    ratio = overlap_ratio(body, image_text)
+    if ratio < 0.10:
+        return f"另写一篇（重叠 {ratio:.1%}）：两份都是原文，都要读"
+    if ratio > 0.90:
+        return f"同一篇（重叠 {ratio:.1%}）：图上只是重新排版，读正文层即可，标题去图上补"
+    return f"部分重叠（{ratio:.1%}）：正文层可能是增补版，两份都要读"
+
+
+def image_dominance(image_chars: int, text_chars: int, ratio: float = 1.5) -> str:
+    """OCR 出的字 vs 正文层的字 → 篇幅谁大。
+
+    ⚠️ 它只说篇幅，**不说内容是否同一篇**——那要用 layer_relation 算重叠。
+    实测同一批数据里两者完全脱钩：卡兹克 46 倍但重叠 2.7%，知新 3259 只有 2.1 倍却重叠 95.6%。
     """
     if image_chars <= 0:
         return "图片无可读文字"
