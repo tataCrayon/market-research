@@ -102,8 +102,9 @@ def render_board(
 {token_note}
 <div class="steps">
   <b>1.</b> 中键 / Ctrl+单击，一次连开 3–5 个链接（新标签页）<br>
-  <b>2.</b> 逐个切过去，等页面加载完，按 <code>Ctrl+S</code> → 保存类型选「网页，仅 HTML」<br>
-  <b>3.</b> 全部存完，回到终端跑 <code>ar ingest</code>；刷新本页看还剩几篇
+  <b>2.</b> 逐个切过去，等页面加载完，按 <code>Ctrl+S</code> → 保存类型选「<b>网页，完整</b>」<br>
+  <span style="color:#b8613c">⚠️ 别选「仅 HTML」：图文笔记的正文常常只排版在图上（实测正文层只占全文 1%–43%），「仅 HTML」会把图全丢掉</span><br>
+  <b>3.</b> 全部存完，回到终端跑 <code>ar ingest</code> → <code>ar images --ocr</code>；刷新本页看还剩几篇
 </div>
 <p class="count">本页是纯静态文件：没有脚本、不发请求、不保存任何东西——它只提供链接，点开与保存都由你完成。</p>
 

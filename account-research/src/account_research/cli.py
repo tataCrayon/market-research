@@ -520,8 +520,10 @@ def cmd_links(args: argparse.Namespace) -> int:
     lines = [
         "# 待采详情页清单",
         "",
-        "用法：**右键链接 → 在新标签页中打开**（不要从主页点开弹层）→ 等加载完 → Ctrl+S（仅 HTML）",
-        "→ 全部存完丢进 `account/inbox/` → `python account-research/ar.py ingest`",
+        "用法：**右键链接 → 在新标签页中打开**（不要从主页点开弹层）→ 等加载完 →"
+        " Ctrl+S 选「**网页，完整**」（选「仅 HTML」会丢掉图，而图文笔记的正文常在图上）",
+        "→ 全部存完丢进 `account/inbox/` → `python account-research/ar.py ingest`"
+        " → `python account-research/ar.py images --ocr`",
         "",
         f"共 {len(pending)} 篇；标「已有正文」的只缺赞/藏/评。"
         f"链接带 token：{with_token}/{len(pending)}。",
