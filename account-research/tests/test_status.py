@@ -26,18 +26,22 @@ class TestSingleFileIngest(unittest.TestCase):
         self.work.mkdir()
         self.single = self.work / "一篇.html"
         shutil.copy(FIXTURES / "minimal_profile.html", self.single)
+        # 正文归档只写临时目录：真实 account/notes-text/ 是证据
+        self.text_dir = Path(self.tmp.name) / "notes-text"
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def test_single_file_does_not_need_inbox(self):
-        code = main(["ingest", str(self.single), "--on", "2026-10-27", "--data", str(self.data), "--ledger", ""])
+        code = main(["ingest", str(self.single), "--on", "2026-10-27", "--data", str(self.data),
+                     "--ledger", "", "--text-dir", str(self.text_dir)])
         self.assertEqual(code, 0)
         self.assertEqual(len(store.read_table(self.data, "accounts")), 1)
         self.assertFalse(self.single.exists())          # 已归档
 
     def test_status_reports_next_step(self):
-        main(["ingest", str(self.single), "--on", "2026-10-27", "--data", str(self.data), "--ledger", ""])
+        main(["ingest", str(self.single), "--on", "2026-10-27", "--data", str(self.data),
+              "--ledger", "", "--text-dir", str(self.text_dir)])
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
             code = main(["status", "--data", str(self.data)])

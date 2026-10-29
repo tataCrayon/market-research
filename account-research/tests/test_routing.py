@@ -16,7 +16,7 @@ ACC_A = "62c98736000000001501e075"
 ACC_B = "614363ea000000000201bdfc"
 
 DETAIL_HTML = """<html><head>
-<meta property="og:url" content="https://www.xiaohongshu.com/explore/6adc2f910000000024039fde" />
+<meta property="og:url" content="https://www.xiaohongshu.com/explore/0000000000000000000000f1" />
 <title>测试 - 小红书</title></head><body>
 <div class="interaction-container"><div class="author-container"><div class="author-wrapper">
   <div class="info">

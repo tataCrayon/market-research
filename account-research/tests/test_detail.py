@@ -23,7 +23,7 @@ class TestDetailExtraction(unittest.TestCase):
         self.fields = extract_detail(self.html)
 
     def test_og_url_identifies_note(self):
-        self.assertEqual(self.fields.note_id, "6adc2f910000000024039fde")
+        self.assertEqual(self.fields.note_id, "0000000000000000000000f1")
         self.assertTrue(looks_like_detail_html(self.html))
 
     def test_counts_taken_from_interact_bar_not_background_feed(self):
@@ -65,14 +65,27 @@ class TestParseDetailCommand(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.data = Path(self.tmp.name)
+        # 正文必须落到临时目录。**踩过的坑**：fixture 的 note_id 恰好等于一篇真实笔记的 id，
+        # 不指 --text-dir 时 `parse-detail` 会把 6 个字的假正文写进
+        # account/notes-text/<真实 id>.txt，静默覆盖 167 字真实正文——测试污染证据。
+        self.text_dir = self.data / "notes-text"
         store.append_rows(self.data, "accounts", [{"account_id": "acc1", "collected_on": "2026-10-27", "grade": "②"}])
 
     def tearDown(self):
         self.tmp.cleanup()
 
+    def _run(self, *extra: str) -> int:
+        return main(["parse-detail", str(FIXTURES / "minimal_detail.html"), "--on", "2026-10-27",
+                     "--data", str(self.data), "--ledger", "", "--text-dir", str(self.text_dir), *extra])
+
+    def test_body_archived_into_given_text_dir_only(self):
+        self.assertEqual(self._run("--account", "acc1"), 0)
+        archived = self.text_dir / "0000000000000000000000f1.txt"
+        self.assertTrue(archived.is_file())
+        self.assertIn("第一段正文", archived.read_text(encoding="utf-8"))
+
     def test_new_note_from_detail_page_has_title_but_no_fake_date(self):
-        code = main(["parse-detail", str(FIXTURES / "minimal_detail.html"), "--on", "2026-10-27",
-                     "--data", str(self.data), "--ledger", "", "--account", "acc1"])
+        code = self._run("--account", "acc1")
         self.assertEqual(code, 0)
         row = store.read_table(self.data, "notes")[0]
         self.assertEqual(row["title"], "测试详情页标题")
@@ -82,12 +95,11 @@ class TestParseDetailCommand(unittest.TestCase):
 
     def test_existing_note_keeps_home_page_title(self):
         store.append_rows(self.data, "notes", [{
-            "account_id": "acc1", "note_id": "6adc2f910000000024039fde", "published_at": "2026-10-24",
+            "account_id": "acc1", "note_id": "0000000000000000000000f1", "published_at": "2026-10-24",
             "title": "主页存档给的标题", "form": "视频", "likes": "700", "pinned": "0",
             "source_file": "home.html", "source_kind": "公开页", "collected_on": "2026-10-27", "grade": "②",
         }])
-        code = main(["parse-detail", str(FIXTURES / "minimal_detail.html"), "--on", "2026-10-27",
-                     "--data", str(self.data), "--ledger", "", "--account", "acc1"])
+        code = self._run("--account", "acc1")
         self.assertEqual(code, 0)
         merged = store.latest_per_note(store.read_table(self.data, "notes"))[0]
         self.assertEqual(merged["title"], "主页存档给的标题")   # 主页的更权威
@@ -96,7 +108,7 @@ class TestParseDetailCommand(unittest.TestCase):
 
     def test_home_page_snapshot_rejected_by_parse_detail(self):
         code = main(["parse-detail", str(FIXTURES / "minimal_profile.html"), "--on", "2026-10-27",
-                     "--data", str(self.data), "--ledger", ""])
+                     "--data", str(self.data), "--ledger", "", "--text-dir", str(self.text_dir)])
         self.assertEqual(code, 1)
 
 

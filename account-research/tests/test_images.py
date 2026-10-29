@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from account_research import images as img
 
-NOTE_ID = "6adc2f910000000024039fde"
+NOTE_ID = "0000000000000000000000f1"
 
 
 def detail_html(image_list: list[dict] | None = None, *, slide_names: list[str] | None = None,

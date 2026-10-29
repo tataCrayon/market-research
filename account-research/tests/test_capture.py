@@ -73,6 +73,8 @@ class TestIngest(unittest.TestCase):
         self.data = Path(self.tmp.name) / "data"
         self.inbox = Path(self.tmp.name) / "inbox"
         self.inbox.mkdir()
+        # 正文归档只写临时目录：真实 account/notes-text/ 是证据，测试不许碰
+        self.text_dir = Path(self.tmp.name) / "notes-text"
         shutil.copy(FIXTURES / "minimal_profile.html", self.inbox / "主页.html")
         shutil.copy(FIXTURES / "minimal_search.html", self.inbox / "搜索页.html")
         (self.inbox / "详情.txt").write_text(BLOCK, encoding="utf-8")
@@ -82,7 +84,7 @@ class TestIngest(unittest.TestCase):
 
     def _run(self):
         return main(["ingest", str(self.inbox), "--on", "2026-10-22",
-                     "--data", str(self.data), "--ledger", ""])
+                     "--data", str(self.data), "--ledger", "", "--text-dir", str(self.text_dir)])
 
     def test_mixed_inbox_ingested_and_archived(self):
         self.assertEqual(self._run(), 0)

@@ -36,6 +36,7 @@ from .validate import validate_dir, validate_tables
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DATA = REPO_ROOT / "account-research" / "data"
 DEFAULT_INBOX = REPO_ROOT / "account" / "inbox"
+DEFAULT_TEXT_DIR = REPO_ROOT / "account" / "notes-text"
 DEFAULT_LEDGER = REPO_ROOT / "account-research" / "skill" / "账号库台账.md"
 DEFAULT_ARCHIVE = REPO_ROOT / "account" / "数字生命卡兹克"
 DEFAULT_FIXTURE = REPO_ROOT / "account-research" / "tests" / "fixtures" / "expected_kazike_20261022.json"
@@ -114,6 +115,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="作者不在库里时按作者名建占位账号（默认拒收）")
     detail.add_argument("--data", default=str(DEFAULT_DATA))
     detail.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    detail.add_argument("--text-dir", default="",
+                        help="正文归档目录；默认 account/notes-text（测试用临时目录，别碰真实证据）")
     detail.set_defaults(func=cmd_parse_detail)
 
     images = sub.add_parser("images", help="图片通道：列出存档里的正文图，并把图上的文字 OCR 成文件")
@@ -157,6 +160,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="作者不在库里时按作者名建占位账号（默认拒收，防止串号）")
     ingest.add_argument("--data", default=str(DEFAULT_DATA))
     ingest.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    ingest.add_argument("--text-dir", default="",
+                        help="正文归档目录；默认 account/notes-text（测试用临时目录）")
     ingest.set_defaults(func=cmd_ingest)
 
     status = sub.add_parser("status", help="进度总览：采了多少、还差多少、卡在哪")
@@ -179,6 +184,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="作者不在库里时自动建占位账号（默认拒收）")
     watch.add_argument("--data", default=str(DEFAULT_DATA))
     watch.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    watch.add_argument("--text-dir", default="",
+                       help="正文归档目录；默认 account/notes-text（测试用临时目录）")
     watch.set_defaults(func=cmd_watch)
     return root
 
@@ -473,7 +480,6 @@ def cmd_fill(args: argparse.Namespace) -> int:
 
 
 NOTE_URL = "https://www.xiaohongshu.com/explore/{note_id}"
-TEXT_DIR = "notes-text"
 
 
 def cmd_links(args: argparse.Namespace) -> int:
@@ -616,7 +622,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                         handled.append(path)
                         print(f"✅ {path.name}：详情页 note_id={fields.note_id}"
                               f"（赞 {fields.likes or '⬜'} / 藏 {fields.collects or '⬜'} / 评 {fields.comments or '⬜'}）")
-                        _archive_body(fields)
+                        _archive_body(fields, _image_text_root(args))
                         continue
                 skipped.append((path, REJECT_REASONS.get(archive.kind, "无法识别")))
                 continue
@@ -668,7 +674,12 @@ def _stamp() -> str:
 
 
 def cmd_parse_detail(args: argparse.Namespace) -> int:
-    """详情页 HTML → 笔记级字段。前提：og:url 指向 /explore/<id>（否则是主页快照）。"""
+    """详情页 HTML → 笔记级字段。前提：og:url 指向 /explore/<id>（否则是主页快照）。
+
+    `--text-dir` 让单测把正文写到临时目录：真实 `account/notes-text/` 是证据，不能被测试碰
+    （实测踩过——fixture 的 note_id 恰好等于真实笔记 id，6 字假正文覆盖了 167 字真正文）。
+    """
+    text_root = _image_text_root(args)
     updates: list[dict[str, Any]] = []
     for raw in args.files:
         path = Path(raw)
@@ -693,7 +704,7 @@ def cmd_parse_detail(args: argparse.Namespace) -> int:
         print(f"   正文前 60 字：{fields.body[:60] or '⬜'}")
         if fields.missing:
             print(f"   ⚠️ 未取到：{fields.missing}（保持 ⬜，不估算）")
-        archived = _archive_body(fields)
+        archived = _archive_body(fields, text_root)
         if archived:
             print(f"   正文已归档：{archived}")
         updates.append(fields.as_row_updates())
@@ -702,24 +713,50 @@ def cmd_parse_detail(args: argparse.Namespace) -> int:
     return _detail_rows(args, updates, allow_new=True)
 
 
-def _archive_body(fields: Any) -> str:
+def _archive_body(fields: Any, text_root: Path) -> str:
+    """正文落本地文件（长文本不进 CSV）。返回写入的相对路径；未写返回空串。
+
+    **必须保留分段**：小红书的正文用裸换行分段，压平成一整块之后，
+    「他分了几段 / 钩子在第几段 / 有没有空行隔断」这些结构证据就没了——
+    而那正是爆款拆解要看的东西。段落之间用空行写，读起来也像原文。
+
+    `text_root` 必须由调用方给（默认 `account/notes-text`），**不能用模块常量**：
+    实测踩过——单测拿 fixture 跑 `parse-detail`，fixture 的 note_id 恰好是真实笔记 id，
+    于是 6 个字的假正文把 167 字的真实正文静默覆盖了。测试污染真实证据，比测试失败危险得多。
+
+    并加一道「不许静默变短」的闸：现有文件明显更长时保留原样，新内容另存 `.new.txt` 并报出来。
+    """
     if not fields.note_id or not fields.body:
         return ""
-    target_dir = REPO_ROOT / "account" / "notes-text"
+    target_dir = text_root
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{fields.note_id}.txt"
     paragraphs = getattr(fields, "paragraphs", ()) or (fields.body,)
+    body_text = "\n\n".join(paragraphs)
     header = (
         f"# {fields.title}\n"
         f"# 标签：{' '.join(fields.tags)}\n"
         f"# 赞/藏/评：{fields.likes}/{fields.collects}/{fields.comments}\n"
         f"# 段落数：{len(paragraphs)}\n\n"
     )
-    target.write_text(header + "\n\n".join(paragraphs), encoding="utf-8")
-    return str(target.relative_to(REPO_ROOT))
+    existing = target.read_text(encoding="utf-8") if target.is_file() else ""
+    existing_body = sum(len(line) for line in existing.splitlines() if not line.startswith("#"))
+    if existing_body > max(len(body_text) * 2, len(body_text) + 80):
+        shrunken = target.with_suffix(".new.txt")
+        shrunken.write_text(header + body_text, encoding="utf-8")
+        print(f"   ⚠️ 已有一份更长的正文（{existing_body} 字 > 新读到的 {len(body_text)} 字），"
+              f"**保留原样**；新内容另存 {shrunken.name}")
+        return ""
+    target.write_text(header + body_text, encoding="utf-8")
+    return str(target)
 
 
 TEXT_DIR = "notes-text"
+
+
+def _image_text_root(args: argparse.Namespace) -> Path:
+    """图上文字的落盘目录。单测通过 --text-dir 指到临时目录，不碰真实证据。"""
+    return Path(args.text_dir) if getattr(args, "text_dir", "") else DEFAULT_TEXT_DIR
 
 
 def _detail_archives(files: list[str], root: Path) -> list[Path]:
@@ -751,7 +788,7 @@ def cmd_images(args: argparse.Namespace) -> int:
     if not archives:
         print(f"没有可处理的 HTML：{root}")
         return 1
-    text_root = Path(args.text_dir) if args.text_dir else REPO_ROOT / "account" / TEXT_DIR
+    text_root = _image_text_root(args)
     engine = None
     if args.ocr:
         try:
@@ -890,6 +927,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 sub_args = argparse.Namespace(
                     path=[str(path)], on=args.on, data=args.data, ledger=args.ledger,
                     new_authors=getattr(args, "new_authors", False),
+                    text_dir=getattr(args, "text_dir", ""),
                 )
                 try:
                     code = cmd_ingest(sub_args)

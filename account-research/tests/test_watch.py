@@ -26,6 +26,7 @@ class TestWatch(unittest.TestCase):
         self.data = base / "data"
         self.inbox = base / "inbox"
         self.inbox.mkdir()
+        self.text_dir = base / "notes-text"   # 正文归档只写临时目录，不碰真实证据
         shutil.copytree(ROOT / "data", self.data)
 
     def tearDown(self):
@@ -35,7 +36,8 @@ class TestWatch(unittest.TestCase):
         return subprocess.Popen(
             [sys.executable, "-u", str(AR), "watch",
              "--path", str(self.inbox), "--interval", "0.5",
-             "--on", "2026-10-28", "--data", str(self.data), "--ledger", ""],
+             "--on", "2026-10-28", "--data", str(self.data), "--ledger", "",
+             "--text-dir", str(self.text_dir)],
             cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace",
         )
