@@ -683,14 +683,25 @@ def cmd_parse_detail(args: argparse.Namespace) -> int:
 
 
 def _archive_body(fields: Any) -> str:
-    """正文落本地文件（长文本不进 CSV）。目录在 account/ 下，随存档一起被 gitignore。"""
+    """正文落本地文件（长文本不进 CSV）。目录在 account/ 下，随存档一起被 gitignore。
+
+    **必须保留分段**：小红书的正文用裸换行分段，压平成一整块之后，
+    「他分了几段 / 钩子在第几段 / 有没有空行隔断」这些结构证据就没了——
+    而那正是爆款拆解要看的东西。段落之间用空行写，读起来也像原文。
+    """
     if not fields.note_id or not fields.body:
         return ""
     target_dir = REPO_ROOT / "account" / "notes-text"
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{fields.note_id}.txt"
-    header = f"# {fields.title}\n# 标签：{' '.join(fields.tags)}\n# 赞/藏/评：{fields.likes}/{fields.collects}/{fields.comments}\n\n"
-    target.write_text(header + fields.body, encoding="utf-8")
+    paragraphs = getattr(fields, "paragraphs", ()) or (fields.body,)
+    header = (
+        f"# {fields.title}\n"
+        f"# 标签：{' '.join(fields.tags)}\n"
+        f"# 赞/藏/评：{fields.likes}/{fields.collects}/{fields.comments}\n"
+        f"# 段落数：{len(paragraphs)}\n\n"
+    )
+    target.write_text(header + "\n\n".join(paragraphs), encoding="utf-8")
     return str(target.relative_to(REPO_ROOT))
 
 

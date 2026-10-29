@@ -19,7 +19,7 @@ OG_URL_RE = re.compile(r'og:url[^>]*content="([^"]+)"')
 NOTE_ID_RE = re.compile(r"/(?:explore|discovery/item)/([0-9a-f]{24})", re.I)
 TITLE_RE = re.compile(r'<h1[^>]*id="detail-title"[^>]*>(.*?)</h1>', re.S)
 DESC_RE = re.compile(r'<div[^>]*id="detail-desc"[^>]*>(.*?)</div>', re.S)
-TAG_RE = re.compile(r'id="hash-tag"[^>]*>(.*?)</a>', re.S)
+TAG_RE = re.compile(r'<a[^>]*id="hash-tag"[^>]*>(.*?)</a>', re.S)
 AUTHOR_RE = re.compile(r'class="username"[^>]*>([^<]{1,40})<')
 # 作者主页链接：抄「小红书 - 同步开启博主首页」扩展的选择器（.author-container .info>a），
 # 实测在真实详情页里成立。这个 id 用来做**归属校验**——判断详情页里的作者是不是目标账号。
@@ -27,6 +27,9 @@ AUTHOR_LINK_RE = re.compile(
     r'class="author-container".{0,900}?href="[^"]*?/user/profile/([0-9a-f]{24})', re.S
 )
 TAG_STRIP_RE = re.compile(r"<[^>]+>")
+# 兜底：被前面步骤切断后残留的半截标签（只剩 `<a` 这种）。
+# 不清掉它就会多出一个「只含 <a 的假段落」，把段数从 3 变成 4。
+RESIDUAL_TAG_RE = re.compile(r"<[a-zA-Z/][^<>\n]*$", re.M)
 WS_RE = re.compile(r"[\s\u3000]+")
 INTERACT_RE = re.compile(r'class="interact-container"')
 COUNT_IN_BAR_RES = {
@@ -63,6 +66,7 @@ class DetailFields:
     comments: str = ""
     duration: str = ""
     body: str = ""
+    paragraphs: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
     missing: list[str] = field(default_factory=list)
 
@@ -99,6 +103,25 @@ def _text(raw: str) -> str:
     return WS_RE.sub(" ", TAG_STRIP_RE.sub(" ", raw or "")).strip()
 
 
+# 小红书的正文用**裸换行**分段（没有 <p>/<br>），存档里长这样：`…巨变。\n\t\n想想身边…`
+# 所以必须先把「空行」识别成分段，再做空白折叠——否则 900 字会被压成一个巨块，
+# 结构分析（看他分几段、钩子在第几段）就彻底失效。
+BLANK_LINE_RE = re.compile(r"[ \t\u3000]*\n[ \t\u3000]*\n[ \t\u3000]*")
+SINGLE_NL_RE = re.compile(r"[ \t\u3000]*\n[ \t\u3000]*")
+
+
+def body_paragraphs(raw_desc: str) -> tuple[str, ...]:
+    """把正文 HTML 片段切成段落。段落结构本身就是拆解要用的证据，不能压平。"""
+    text = TAG_STRIP_RE.sub("", raw_desc or "").replace("\r\n", "\n").replace("\r", "\n")
+    # 半截标签：调用方可能先用别的正则摘掉 <a id="hash-tag">…</a>，只留下一个没有 '>' 的 `<a`，
+    # TAG_STRIP_RE 要求成对尖括号因此漏掉它，最后会变成一个只含 `<a` 的假段落。
+    text = RESIDUAL_TAG_RE.sub("", text)
+    text = BLANK_LINE_RE.sub("\x00", text)
+    text = SINGLE_NL_RE.sub(" ", text)
+    chunks = [WS_RE.sub(" ", part).strip() for part in text.split("\x00")]
+    return tuple(chunk for chunk in chunks if chunk)
+
+
 def extract_detail(html: str) -> DetailFields:
     url = og_url(html)
     fields = DetailFields(note_id=note_id_from_url(url), og_url=url)
@@ -110,7 +133,8 @@ def extract_detail(html: str) -> DetailFields:
     if desc_match:
         raw_desc = desc_match.group(1)
         fields.tags = tuple(_text(tag) for tag in TAG_RE.findall(raw_desc) if _text(tag))
-        fields.body = _text(TAG_RE.sub(" ", raw_desc))
+        fields.paragraphs = body_paragraphs(TAG_RE.sub(" ", raw_desc))
+        fields.body = " ".join(fields.paragraphs)
 
     author_match = AUTHOR_RE.search(html)
     fields.author = _text(author_match.group(1)) if author_match else ""
