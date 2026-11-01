@@ -334,14 +334,22 @@ def build_task(snapshot: Snapshot, repo_root: Path) -> str:
         "5. **判决封闭**：五选一 + 三件套（最值钱的一步 / 最便宜的验证含时间预算 / 放弃信号），不许「值得考虑」。",
         "6. 不要写方法论、不要做涨粉预测、不要写 HTML 可视化。",
         "",
-        "## 1 先读这些契约（按顺序）",
+        "## 1 先读这两份（其余的这次都不用读）",
         "",
-        "- `account-research/agent/account-analyst.md`（你的契约：七条禁止、自治边界）",
-        "- `account-research/skill/SKILL.md`（九步流程、硬信念、判决规则）",
-        "- `account-research/skill/references/overall-workflow.md`（端到端与质量闸门）",
-        "- `account-research/skill/references/xiaohongshu-metrics.md`（指标口径与可得性）",
-        "- `account-research/data/findings.csv` 与 `playbook.csv`（**已有行**：新 finding_id / action_id 不得与它们重号）",
+        "- `account-research/agent/account-analyst.md`（你的契约：七条禁止、自治边界）——全读。",
+        "- `account-research/skill/SKILL.md`——**只读中间一段**：用 grep 找到 `### Step 2: POSITION` "
+        "的行号，从那一行 read 到 `## 输入参数契约` 之前（四层拆解方法 + 三件套 + 落库）。"
+        "该文件其余部分（版本史记、输出模板、与其他 Skill 的关系）本次不需要；整份 5 万字读下来只会稀释判断。",
         f"- 正文与图上文字目录：`{_rel(Path('account') / 'notes-text', repo_root)}`",
+        "",
+        "**不要读的东西**（实测上一轮读它们白花了约二十万 tokens）：",
+        "",
+        "- 不要读 `account-research/src/` 下的任何源码——那是产出这张任务的工具本身，不含判断依据"
+        "（上一轮读了 `debrief.py` / `schema.py` / `validate.py`）。",
+        "- 不要读 `data/*.csv`。你需要的数字全在 §2–§6 里：已有 id 在 §6 列全了，"
+        "不要为了「避免重号」去翻 CSV；上一轮为此 glob 了整个 `data/` 并读了 5 个表。",
+        "- 不要读 `skill/references/overall-workflow.md`（产品级管线，与本次单个账号的拆解无关）"
+        "和 `skill/references/xiaohongshu-metrics.md`（口径已固化在 §4/§5，争议时才溯源）。",
         "",
         "## 2 本次要拆的账号",
         "",

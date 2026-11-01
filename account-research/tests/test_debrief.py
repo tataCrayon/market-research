@@ -121,6 +121,22 @@ class TestTaskPayload(unittest.TestCase):
         task = debrief.build_task(snapshot, self.data.parent)
         self.assertIn("一篇图上文字都没有", task)
 
+    def test_task_closes_the_read_surface(self):
+        """「该读什么」清单有长度上限，超了就变成暗示「这些都可以读」。
+
+        实测上一轮 34 次工具调用、114 万 input tokens，其中二十多万花在读
+        `src/`、`data/*.csv`、`overall-workflow.md`——它们对本步判断没有增量。
+        所以任务的 §1 必须**短**，且显式列出禁读项：只写「读什么」，模型仍会
+        自行发挥去翻别的（尤其想「核对一下」时）。
+        """
+        snapshot = debrief.collect_snapshot(self.data, "acc1", self.text)
+        task = debrief.build_task(snapshot, self.data.parent)
+        self.assertIn("不要读的东西", task)
+        for banned in ("account-research/src/", "data/*.csv", "overall-workflow.md"):
+            self.assertIn(banned, task)
+        # 已有 id 必须由任务直接给，否则模型会为了防重号去读 findings.csv / playbook.csv
+        self.assertIn("已占用", task)
+
     def test_unknown_account_lists_known_ones(self):
         with self.assertRaises(debrief.DebriefError) as caught:
             debrief.collect_snapshot(self.data, "不存在", self.text)
