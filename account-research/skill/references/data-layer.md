@@ -48,7 +48,7 @@
 
 ```bash
 python account-research/ar.py probe      <存档...>          # 判页面类型与归属（3 秒级，先于一切解析）
-python account-research/ar.py ingest     [目录|文件...]     # 采件箱：自动判别 HTML/粘贴块 → 入库 → 归档
+python account-research/ar.py ingest     [目录|文件...]     # 采件箱：自动判别 HTML/粘贴块 → 入库 → 归档（顺带跑图上文字 OCR）
 python account-research/ar.py watch      [--interval 3]     # 守着采件箱，文件落地即自动入库
 python account-research/ar.py status                        # 进度总览 + 下一步该跑哪条
 python account-research/ar.py quota                         # 今日额度（主页 3 / 详情 30）
@@ -56,6 +56,7 @@ python account-research/ar.py gaps       [--limit N]        # 缺口清单（缺
 python account-research/ar.py links      [--limit N] [--out todo.md]   # 待采详情页的可点击链接清单
 python account-research/ar.py parse-detail <存档...>       # 详情页 HTML → 赞/藏/评/时长 + 正文归档
 python account-research/ar.py images     [--ocr] [--limit N]  # 图片通道：正文图清单 → OCR 成 <note_id>.images.txt
+python account-research/ar.py debrief    [--account <id>] [--dry-run] [--commit] [--replay <payload>]  # 拆解：拼任务 → dsh headless → 产物待审
 python account-research/ar.py fill       [--limit N]        # 逐篇口播补数（交互式，一次提交）
 python account-research/ar.py parse      <存档...> --on 2026-10-22   # 主页存档 → accounts / notes
 python account-research/ar.py record     --file detail.json --on 2026-10-22   # 详情页人工补数（藏/评/时长）
@@ -101,7 +102,7 @@ python account-research/ar.py selftest                     # 对真实存档跑�
 | 产出 | 内容 | 谁写 |
 |---|---|---|
 | `account/notes-text/<note_id>.txt` | 正文层（`#detail-desc`），作者自己压过的版本 | `parse-detail` / `ingest` |
-| `account/notes-text/<note_id>.images.txt` | 图上文字，一张图一段，带质量标记 | `images --ocr` |
+| `account/notes-text/<note_id>.images.txt` | 图上文字，一张图一段，带质量标记 | `ingest`（自动）/ `images --ocr`（事后补跑） |
 
 **三条硬规则**：
 1. 图与笔记的 join key = **URL 末段**（`imageList[].fileId` 带 `spectrum/` / `notes_pre_post/` 前缀，与 `_files/` 文件名对不上）；
@@ -116,3 +117,31 @@ python account-research/ar.py selftest                     # 对真实存档跑�
 | 张数看 `ar images` 的 **「平台声明 N」**：绑到 < 声明 = 我们漏了，修解析；相等 = 原始数据就这样 | 否则分不清「解析 bug」和「图本身残缺」。实测知新 4512 绑到 5、平台也声明 5，是第 5 张图断在半句 |
 
 详见 [../../docs/图片内容通道.md](../../docs/图片内容通道.md)。
+
+## 8. 拆解这一步（S2）：确定性留在 `ar`，判断交给模型
+
+四张结论表（findings / playbook / hypotheses / verdicts）是**判断**，写不成规则。但「把判断需要的东西取齐」是确定性的——所以拆解拆成两截：
+
+| 这一截 | 谁干 | 为什么不能换人 |
+|---|---|---|
+| 取快照、算统计、拼任务、过闸门、落库 | `ar debrief`（代码） | 篇均/中位/爆款率键到小数点后两位，模型算会漂；列名手抄会漂——漂了是静默错数据 |
+| 四层拆解、可抄清单、封闭判决 | `dsh headless`（模型） | 这是归纳判断，写规则写不出来 |
+
+```bash
+ar debrief --account <id> --dry-run      # 只看任务长什么样（不落盘、不调模型）
+ar debrief --account <id>                # 真跑：产物落 payload.json，人复核
+ar debrief --account <id> --replay <payload.json> --commit   # 改完 JSON 重走闸门并落库
+```
+
+**三条由代码保证、不靠提示词自觉的事**：
+
+1. **任务文本的列名从 `schema.py` 现取**，不是手写模板——列名漂了，产出会被 `check_payload` 当成「自造字段」拒收，而不是静默写进去。
+2. **运行时关网、关 shell、关写文件**：`ar debrief` 生成一份覆盖层（`runtime.patch.yml`，每次运行存档），把 `tool-web` / `tool-pwsh` / `tool-bash` 置 `disabled: true`，`tool-fs` 只留 `read: true`（`write` / `edit` / `readImage` 全关）。**结论只能从 stdout 交回**——留下写权限等于给了模型一条直写 CSV 的路，而 append-only 表没有回滚。`readImage: false` 就是 R7 的代码化。
+3. **默认不落库**：产物写 `payload.json`，`--commit` 才过 V1–V8 并写表。这是 `agent-run-001` §4 的教训——先写后校验的代价是脏行永久留下。
+
+**`--replay` 为什么是必需项而不是优化**：一轮拆解花 60–114 万 input tokens、7–11 分钟。闸门拦下一个数字就打回重跑，代价高到会教人绕过闸门。所以闸门必须能在**不重跑模型**的前提下重走。
+
+**闸门的边界（这条比闸门本身重要）**：`audit_ratios` 只校验「数字旁边点了字段名」的 `a/b` 断言（`4/31 篇有图上文字`），且只放行能由表数出的分子与它的补数。它不是全量扫 `a/b`——`2/31 篇首图` 这种代码没建模的子集真话必须放过。**一个会把真话判成错的闸门，比没有闸门更坏**：它教人怀疑校验器，然后绕过全部校验。
+
+**任务的 §1 是一份「读什么」白名单，不是参考书目**：第一轮 34 次工具调用、114 万 input tokens，其中约二十万花在读 `src/*.py`（产出任务的工具本身）、`data/*.csv`（已有 id 其实任务里列全了）、`overall-workflow.md`（产品级管线，与本步无关）。模型不是乱读——它在「核对一下」：防重号就翻 CSV，想确认闸门就翻 `validate.py`。所以任务里现在**显式写「不要读」并给出理由**，同时把「已有 id」直接列在 §6。要模型别读什么，得先在任务里说清，光靠「少给路径」不够。
+
