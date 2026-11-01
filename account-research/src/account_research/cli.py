@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,21 @@ from typing import Any, Sequence
 
 from . import schema, store
 from .board import render_board
+from .debrief import (
+    TARGET_TABLES,
+    DebriefError,
+    audit_ratios,
+    build_runtime_patch,
+    build_task,
+    check_payload,
+    collect_snapshot,
+    drop_empty_rows,
+    extract_payload,
+    find_source_patch,
+    normalize_rows,
+    payload_summary,
+    run_headless,
+)
 from .detail import extract_detail
 from .images import (
     OcrUnavailable,
@@ -166,6 +182,8 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--ledger", default=str(DEFAULT_LEDGER))
     ingest.add_argument("--text-dir", default="",
                         help="正文归档目录；默认 account/notes-text（测试用临时目录）")
+    ingest.add_argument("--no-ocr", action="store_true",
+                        help="跳过图上文字通道（默认入库后自动跑本地 OCR，图不进模型）")
     ingest.set_defaults(func=cmd_ingest)
 
     status = sub.add_parser("status", help="进度总览：采了多少、还差多少、卡在哪")
@@ -191,6 +209,25 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--text-dir", default="",
                        help="正文归档目录；默认 account/notes-text（测试用临时目录）")
     watch.set_defaults(func=cmd_watch)
+
+    debrief = sub.add_parser("debrief", help="一键拆解：拼任务 → 交给 dsh headless → 产物收回本地待审")
+    debrief.add_argument("--account", default="", help="account_id；省略=库里只有唯一账号时自动选")
+    debrief.add_argument("--data", default=str(DEFAULT_DATA))
+    debrief.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    debrief.add_argument("--text-dir", default="", help="正文/图上文字目录；默认 account/notes-text")
+    debrief.add_argument("--dsh", default="dsh", help="dsh 启动器路径（默认从 PATH 找）")
+    debrief.add_argument("--patch", default="auto",
+                         help="模型路由覆盖层来源档案：auto=依次找 desktop/web 档案；也可直接给文件")
+    debrief.add_argument("--timeout", type=int, default=1800, help="单次运行的秒数上限（默认 1800）")
+    debrief.add_argument("--on", default=today(), help="拆解日期（写入 decided_on / sampled_on）")
+    debrief.add_argument("--out", default="", help="运行产物目录；默认 account-research/data/debrief/<账号>-<时间>")
+    debrief.add_argument("--dry-run", action="store_true", help="只拼任务并打印，不调模型")
+    debrief.add_argument("--commit", action="store_true",
+                         help="产出先过 V1–V8，通过才落库（默认只留 payload.json 待人复核）")
+    debrief.add_argument("--replay", default="",
+                         help="不调模型，直接拿已有的 payload.json 重走检查与落库")
+    debrief.add_argument("--k", default="3,5", help="爆文率 K 值，逗号分隔")
+    debrief.set_defaults(func=cmd_debrief)
     return root
 
 
@@ -629,6 +666,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     block_items: list[dict[str, Any]] = []
     handled: list[Path] = []
     skipped: list[tuple[Path, str]] = []
+    detail_ready: list[Path] = []
 
     for path in candidates:
         if path.suffix.lower() in (".html", ".htm"):
@@ -646,6 +684,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                         print(f"✅ {path.name}：详情页 note_id={fields.note_id}"
                               f"（赞 {fields.likes or '⬜'} / 藏 {fields.collects or '⬜'} / 评 {fields.comments or '⬜'}）")
                         _archive_body(fields, _image_text_root(args))
+                        detail_ready.append(path)
                         continue
                 skipped.append((path, REJECT_REASONS.get(archive.kind, "无法识别")))
                 continue
@@ -680,6 +719,9 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     if not handled:
         print("\n没有可入库的文件。")
         return 1
+
+    if detail_ready and not args.no_ocr:
+        _ingest_ocr(detail_ready, roots[0], _image_text_root(args))
 
     archive_dir = (roots[0] if roots[0].is_dir() else roots[0].parent) / "processed" / args.on
     archive_dir.mkdir(parents=True, exist_ok=True)
@@ -811,6 +853,93 @@ def _detail_archives(files: list[str], root: Path) -> list[Path]:
     )
 
 
+def _detail_note(path: Path, html: str, root: Path) -> Any:
+    """详情页存档 → 图片序列（不跑 OCR）。非详情页返回 None。"""
+    try:
+        archive = open_archive(path)
+    except ArchiveError:
+        archive = None
+    if archive is not None and archive.kind != "note_detail":
+        return None
+    note = collect_images(path, archive.state if archive else {}, html, search_root=root)
+    return note if note.note_id else None
+
+
+def _ocr_note(path: Path, html: str, text_root: Path, engine: Any, root: Path) -> dict[str, Any] | None:
+    """给一篇详情页存档跑图上文字通道，写 `<note_id>.images.txt`，返回摘要。
+
+    抽出来的原因：`ar ingest` 与 `ar images --ocr` 必须是**同一段代码**。
+    两处各写一份，迟早在「篇幅行怎么写 / 关系怎么判」上漂开，
+    而这两行正是模型读结构结论时唯一的路标。
+    """
+    note = _detail_note(path, html, root)
+    if note is None or note.local == 0:
+        return None
+    results = {image.index: ocr_file(engine, image.local) for image in note.images if image.local}
+    if not results:
+        return None
+    target = image_text_path(text_root, note.note_id)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    body = body_text(html)
+    text_chars = body_chars(html)
+    target.write_text(
+        render_text(note, results, {"title": extract_detail(html).title,
+                                    "body_chars": text_chars, "body_text": body}),
+        encoding="utf-8",
+    )
+    image_body = "\n".join("\n".join(result.lines) for result in results.values())
+    image_chars = sum(result.chars for result in results.values())
+    return {
+        "target": target,
+        "ocr_images": len(results),
+        "image_chars": image_chars,
+        "body_chars": text_chars,
+        "dominance": image_dominance(image_chars, text_chars),
+        "relation": layer_relation(body, image_body),
+        "low": [index for index, result in results.items() if result.low_quality],
+    }
+
+
+def _report_ocr(summary: dict[str, Any]) -> None:
+    shown = summary["target"]
+    shown = shown.relative_to(REPO_ROOT) if shown.is_relative_to(REPO_ROOT) else shown
+    print(f"   ✅ 图上文字 {summary['ocr_images']} 张 / {summary['image_chars']} 字 → {shown}")
+    print(f"   篇幅：{summary['dominance']}")
+    print(f"   关系：{summary['relation']}")
+    if summary["low"]:
+        print(f"   ⚠️ 低质量图 {summary['low']}：引用前必须看原图（OCR 置信 <0.80 或字数 <10）")
+
+
+def _ingest_ocr(paths: list[Path], root: Path, text_root: Path, engine: Any = None) -> int:
+    """`ar ingest` 收下详情页后顺手把图上文字取出来——这一步不该由人再记一次命令。
+
+    为什么放在 ingest：`_archive_body` 已经把正文落成 `.txt`，图上文字是**同一篇笔记的另一层**，
+    分两次命令做同一件事，人一定会漏掉后一半（实测：7 篇有正文、只有 4 篇有图上文字，
+    漏的那 3 篇里就有 26 图那篇长文——它的结构结论全在图里）。
+    OCR 引擎缺失时不当错误：这台机器没装 rapidocr 不该让入库失败，只提示一句。
+    """
+    if engine is None:
+        try:
+            engine = load_engine()
+        except OcrUnavailable:
+            print("\n⚠️ 没有 OCR 引擎，图上文字这一层跳过（`python -m pip install rapidocr-onnxruntime`）")
+            print("   正文已经入库；只缺图片层，不阻塞。补装后跑 `ar images --ocr` 即可。")
+            return 0
+    done = 0
+    print("\n图上文字通道（本地 OCR，图不进模型上下文）：")
+    for path in paths:
+        html = path.read_text(encoding="utf-8", errors="replace")
+        summary = _ocr_note(path, html, text_root, engine, root)
+        if summary is None:
+            continue
+        print(f"   {path.name[:40]}")
+        _report_ocr(summary)
+        done += 1
+    if done == 0:
+        print("   （这批详情页没有可绑定的本地图，可能只存了「仅 HTML」）")
+    return done
+
+
 def cmd_images(args: argparse.Namespace) -> int:
     """图片通道：正文写在图里的笔记，把字取出来落成文件。
 
@@ -840,14 +969,8 @@ def cmd_images(args: argparse.Namespace) -> int:
     rows: list[dict[str, Any]] = []
     for path in archives:
         html = path.read_text(encoding="utf-8", errors="replace")
-        try:
-            archive = open_archive(path)
-        except ArchiveError:
-            archive = None
-        if archive is not None and archive.kind != "note_detail":
-            continue
-        note = collect_images(path, archive.state if archive else {}, html, search_root=root)
-        if not note.note_id:
+        note = _detail_note(path, html, root)
+        if note is None:
             continue
         rows.append({
             "path": path, "note": note, "html": html,
@@ -877,31 +1000,9 @@ def cmd_images(args: argparse.Namespace) -> int:
             continue
         if engine is None:
             continue
-        results = {}
-        for image in note.images:
-            if image.local:
-                results[image.index] = ocr_file(engine, image.local)
-        target = image_text_path(text_root, note.note_id)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        detail = extract_detail(row["html"])
-        target.write_text(
-            render_text(note, results, {
-                "title": detail.title,
-                "body_chars": row["text_chars"],
-                "body_text": body_text(row["html"]),
-            }),
-            encoding="utf-8",
-        )
-        low = [index for index, result in results.items() if result.low_quality]
-        image_chars = sum(result.chars for result in results.values())
-        image_body = "\n".join("\n".join(result.lines) for result in results.values())
-        relation = layer_relation(body_text(row["html"]), image_body)
-        shown = target.relative_to(REPO_ROOT) if target.is_relative_to(REPO_ROOT) else target
-        print(f"   ✅ OCR {len(results)} 张 / {image_chars} 字 → {shown}")
-        print(f"   篇幅：{image_dominance(image_chars, row['text_chars'])}")
-        print(f"   关系：{relation}")
-        if low:
-            print(f"   ⚠️ 低质量图 {low}：引用前必须看原图（OCR 置信 <0.80 或字数 <10）")
+        summary = _ocr_note(row["path"], row["html"], text_root, engine, root)
+        if summary:
+            _report_ocr(summary)
     if engine is None:
         print("\n提示：加 `--ocr` 才会把图上的字取出来（需 `python -m pip install rapidocr-onnxruntime`）。")
     return 0
@@ -1023,6 +1124,11 @@ def cmd_status(args: argparse.Namespace) -> int:
           f" | 藏/评齐全 {len(merged) - len(missing)} 篇 | 缺藏/评 {len(missing)} 篇"
           f" | 缺正文 {len(no_body)} 篇（其中 {len(numbers_done_no_body)} 篇数字已齐）")
     print(f"→ 实际还要打开 {need_open} 篇详情页（`ar links` 会把这批都列出来）")
+    if with_images_text < with_text:
+        # 两个数字并排放着还不够：实测 7 vs 4 摆了一整天没人看出来。
+        # 正文有、图上文字没有 = 这篇只读了一半，必须明说。
+        print(f"⚠️ 有 {with_text - with_images_text} 篇是「有正文、没图上文字」："
+              f"正文层可能只是导语，完整内容在图上。跑 `ar images --ocr` 补齐。")
     print()
     inbox = DEFAULT_INBOX
     pending_files = [p for p in inbox.iterdir() if p.is_file()] if inbox.is_dir() else []
@@ -1107,6 +1213,138 @@ def cmd_add(args: argparse.Namespace) -> int:
         print(f"❌ {args.table} 没有这些列：{unknown}（列名见 schema.py，禁止自造字段）")
         return 1
     return _commit_rows(args, args.table, rows)
+
+
+def cmd_debrief(args: argparse.Namespace) -> int:
+    """一键拆解：拼任务 → `dsh headless` 跑模型 → 产物收回本地 → （可选）校验后落库。
+
+    这是方向卡 S2 的那条缝：确定性的活全在 `ar` 里，只有判断交给模型。
+    三件事必须由代码保证，不能交给提示词：
+    1. 任务文本由 `schema.py` 现取列名拼出——手抄的列名会漂，漂了是静默错数据；
+    2. 运行时关掉 web / shell 工具——红线是「不访问任何平台域名」，靠代码关才成立；
+    3. 默认**不落库**：产物先落 `payload.json` 等人看一眼，`--commit` 才过 V1–V8 写表。
+       append-only 表没有回滚，模型的自评不能替代校验。
+    """
+    try:
+        return _debrief(args)
+    except DebriefError as exc:
+        print(f"❌ {exc}")
+        return 1
+
+
+def _debrief(args: argparse.Namespace) -> int:
+    data_dir = Path(args.data)
+    account_id = args.account or _only_account(data_dir)
+    text_dir = _image_text_root(args)
+    k_values = tuple(int(part) for part in str(args.k).split(",") if part.strip())
+    snapshot = collect_snapshot(data_dir, account_id, text_dir, k_values)
+    nickname = str(snapshot.account.get("nickname") or account_id)
+    task = build_task(snapshot, REPO_ROOT)
+    out_dir = Path(args.out) if args.out else (
+        data_dir / "debrief" / f"{nickname}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "task.md").write_text(task, encoding="utf-8")
+    print(f"账号 {nickname}（{account_id}）：样本 {snapshot.stats.n_sample} 篇"
+          f"｜正文 {len(snapshot.body_ready)} 篇｜图上文字 {len(snapshot.images_ready)} 篇")
+    print(f"任务已写入 {out_dir / 'task.md'}（{len(task)} 字）")
+    if args.dry_run:
+        print("\n--dry-run：不调模型。任务全文如下：\n")
+        print(task)
+        return 0
+    if args.replay:
+        return _replay(args, out_dir, snapshot, account_id)
+    patch_file = _runtime_patch(args, out_dir)
+    print(f"运行时覆盖层：{patch_file}")
+    print(f"调用 dsh headless（超时 {args.timeout}s）…")
+    result = run_headless(task, patch_file, args.timeout, args.dsh, REPO_ROOT)
+    (out_dir / "final.md").write_text(result.final_text, encoding="utf-8")
+    (out_dir / "events.json").write_text(
+        json.dumps({"session": result.session_id, "exit": result.exit_code, "turn": result.turn_reason,
+                    "tool_calls": result.tool_calls, "input_tokens": result.input_tokens,
+                    "output_tokens": result.output_tokens, "events": result.events},
+                   ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"模型返回：exit {result.exit_code} | turn {result.turn_reason or '?'} | 工具调用 {result.tool_calls} 次"
+          f" | tokens {result.input_tokens}→{result.output_tokens}")
+    payload = extract_payload(result.final_text)
+    return _finish(payload, out_dir, snapshot, account_id, args)
+
+
+def _replay(args: argparse.Namespace, out_dir: Path, snapshot: Any, account_id: str) -> int:
+    """拿已有 payload.json 重走检查与落库，不再花一次模型调用。
+
+    为什么需要它：模型一轮 60 万 input tokens。闸门判错时要能改 JSON 重跑后半段，
+    否则「修一个数字」的代价是重跑整轮，人就会去绕过闸门。
+    """
+    source = Path(args.replay)
+    if source.is_dir():
+        source = source / "payload.json"
+    payload = _load_json(source)
+    if not isinstance(payload, dict):
+        print(f"❌ {source} 不是一个四表对象。")
+        return 1
+    unknown = sorted(set(payload) - set(TARGET_TABLES))
+    if unknown:
+        print(f"❌ 有不认识的表：{unknown}（只收 {' / '.join(TARGET_TABLES)}）")
+        return 1
+    payload = {table: payload.get(table) or [] for table in TARGET_TABLES}
+    return _finish(payload, out_dir, snapshot, account_id, args)
+
+
+def _finish(payload: Any, out_dir: Path, snapshot: Any, account_id: str, args: argparse.Namespace) -> int:
+    """落库前的公共收尾：丢空行 → 补归属与日期 → 过闸门 → 写 payload.json → 可选落库。"""
+    payload, dropped = drop_empty_rows(payload)
+    if dropped:
+        print(f"丢弃整行空值 {dropped} 行（模板占位被原样带回来的，不是结论）")
+    payload = normalize_rows(payload, account_id, args.on)
+    problems = check_payload(payload) + audit_ratios(snapshot, payload)
+    if problems:
+        rejected = out_dir / "payload.rejected.json"
+        rejected.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        for problem in problems:
+            print(f"❌ {problem}")
+        print(f"\n未落库。有问题的产出留在 {rejected}，改完 JSON 后 `ar add` 或重跑。")
+        return 1
+    payload_file = out_dir / "payload.json"
+    payload_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"产出：{payload_summary(payload)} → {payload_file}")
+    if not args.commit:
+        print("\n未落库（默认）。看一眼 payload.json，确认后加 --commit 重跑，或逐表 `ar add`。")
+        return 0
+    updates = {table: rows for table, rows in payload.items() if rows}
+    if not updates:
+        print("四张表都是空的——没有可落库的内容。")
+        return 1
+    code = _commit_tables(args, updates)
+    if code == 0:
+        print(f"\n已落库，产物目录：{out_dir}")
+    return code
+
+
+def _only_account(data_dir: Path) -> str:
+    accounts = store.read_table(data_dir, "accounts")
+    known = sorted({str(row.get("account_id") or "") for row in accounts} - {""})
+    if len(known) == 1:
+        return known[0]
+    raise DebriefError(
+        f"库里{'有多个账号' if known else '还没有账号'}，请用 --account 指定：{'、'.join(known) or '（空）'}"
+    )
+
+
+def _runtime_patch(args: argparse.Namespace, out_dir: Path) -> Path:
+    """生成并落盘运行时覆盖层。写进产物目录，事后可复现这次用了什么模型、关了哪些工具。"""
+    if args.patch and args.patch != "auto":
+        source = Path(args.patch)
+    else:
+        source = find_source_patch(Path(os.environ.get("DSH_HOME") or Path.home() / ".dsh"))
+        if source is None:
+            raise DebriefError("找不到可借模型路由的档案（desktop / web 都没有 cordis.patch.yml）。"
+                               "用 --patch <文件> 指定一份含 llm-pi-ai 的覆盖层。")
+    target = out_dir / "runtime.patch.yml"
+    target.write_text(build_runtime_patch(source), encoding="utf-8")
+    return target
 
 
 def _load_json(path: Path) -> Any:
@@ -1204,12 +1442,6 @@ def _report(checks: list[tuple[str, bool, str]]) -> int:
         failures += 0 if ok else 1
     print(f"\nselftest：{len(checks) - failures}/{len(checks)} 通过")
     return 1 if failures else 0
-
-
-def _load_json(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
