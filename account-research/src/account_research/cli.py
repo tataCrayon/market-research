@@ -1243,15 +1243,17 @@ def _debrief(args: argparse.Namespace) -> int:
     out_dir = Path(args.out) if args.out else (
         data_dir / "debrief" / f"{nickname}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     )
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "task.md").write_text(task, encoding="utf-8")
     print(f"账号 {nickname}（{account_id}）：样本 {snapshot.stats.n_sample} 篇"
           f"｜正文 {len(snapshot.body_ready)} 篇｜图上文字 {len(snapshot.images_ready)} 篇")
-    print(f"任务已写入 {out_dir / 'task.md'}（{len(task)} 字）")
     if args.dry_run:
-        print("\n--dry-run：不调模型。任务全文如下：\n")
+        # 不落盘：dry-run 只是「让我看看任务长什么样」，写进 data/debrief 会留一堆
+        # 只有 task.md 的空运行目录，事后分不清哪次真跑过。
+        print(f"\n--dry-run：不调模型、不落盘（任务 {len(task)} 字）。任务全文如下：\n")
         print(task)
         return 0
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "task.md").write_text(task, encoding="utf-8")
+    print(f"任务已写入 {out_dir / 'task.md'}（{len(task)} 字）")
     if args.replay:
         return _replay(args, out_dir, snapshot, account_id)
     patch_file = _runtime_patch(args, out_dir)

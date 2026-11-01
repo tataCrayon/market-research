@@ -279,6 +279,57 @@ class TestRatioAudit(unittest.TestCase):
         self.assertIn("有发布日期 3/4", block)
 
 
+class TestDryRunLeavesNoTrace(unittest.TestCase):
+    """--dry-run 只回答「任务长什么样」，不该在 data/debrief 留下一批空运行目录。
+
+    实测踩到过：连着 dry-run 三次，产物目录里多了三个只有 task.md 的目录，
+    和真跑过的两次混在一起——事后分不清哪次花过模型钱，也就无从复核。
+    """
+
+    def setUp(self):
+        from account_research import cli
+
+        self.cli = cli
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data = Path(self.tmp.name) / "data"
+        self.text = Path(self.tmp.name) / "text"
+        self.data.mkdir()
+        self.text.mkdir()
+        (self.data / "accounts.csv").write_text(
+            "account_id,nickname,collected_on\nacc1,测试号,2026-10-22\n", encoding="utf-8")
+        (self.data / "notes.csv").write_text(
+            "account_id,note_id,published_at,title,form,likes,collects,comments,shares,pinned,topic,"
+            "source_file,source_kind,collected_on,grade,duration,human_note,author_id\n"
+            "acc1,n1,2026-10-01,a,图文,100,,,0,,,f.html,公开页,2026-10-22,②,,,\n", encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self):
+        import contextlib
+        import io
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = self.cli.main([
+                "debrief", "--data", str(self.data), "--text-dir", str(self.text),
+                "--account", "acc1", "--dry-run",
+            ])
+        return code, buffer.getvalue()
+
+    def test_no_run_directory_is_created(self):
+        code, output = self._run()
+        self.assertEqual(code, 0)
+        self.assertIn("# 拆解任务", output, "dry-run 还得让人看见任务全文")
+        self.assertFalse((self.data / "debrief").exists(), "dry-run 不该建产物目录")
+
+    def test_dry_run_does_not_call_the_model(self):
+        """没配 dsh 也能跑完——真调模型的话这里会去找可执行文件。"""
+        code, output = self._run()
+        self.assertEqual(code, 0)
+        self.assertNotIn("调用 dsh headless", output)
+
+
 class TestLauncher(unittest.TestCase):
     def test_cmd_shim_goes_through_comspec(self):
         command = debrief.launcher_command("dsh.cmd")
