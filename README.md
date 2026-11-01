@@ -98,24 +98,30 @@ skills/game-research/
     └── 从业者审视-喵喵小馆与草木集.md                  从业者八轴拷问两份报告（双镜自审实证）
 
 account-research/                  产品项目（形态特例，2026-10-22 从 skills/ 提升；Skill 先行 / Web 放大）
-├── README.md                      项目入口：产品定位 + 目录导览 + 路线图
-├── AGENTS.md                      项目契约：继承仓库铁律 + 项目特有纪律（零爬虫边界 / 双输出同源 / 台账只追加）
+├── README.md                      项目入口：产品定位 + 目录导览 + S0–S4 路线图 + 一键拆解用法
+├── AGENTS.md                      项目契约：继承仓库铁律 + 项目特有纪律（零爬虫边界 / 双输出同源 / 台账只追加 / 图不进上下文）
+├── ar.py                          CLI 入口：probe/parse/validate/stats/add/ingest/images/status/links/debrief …
 ├── skill/                         方法论（整体迁入，内部结构不变）
-│   ├── SKILL.md                   v0.2 对标拆解(小红书) + 封闭判决五选一 + 红线(R1隐私/R2零爬虫/R3口径/R4基准/R6相关≠因果) + 双镜自审
+│   ├── SKILL.md                   v0.3.3 对标拆解(小红书) + 封闭判决五选一 + 红线(R1隐私/R2零爬虫/R3口径/R4基准/R6相关≠因果/R7图不进上下文) + 双镜自审
 │   ├── 立项.md                     形态决策史（v0.3 定盘；真相源在仓库外，冲突时以外部 idea.md 为准）
 │   ├── references/
 │   │   ├── xiaohongshu-metrics.md      小红书指标字典：口径标注流程(公开页/后台/工具/不可得) + 账号/内容层指标表 + 爆文率定义分歧 + 基准区间取证规则
 │   │   ├── data-sourcing-playbook.md   数据获取操作手册：四层来源协议 + L0 手动采集 SOP + 防封节奏 + 自动化边界
 │   │   ├── overall-workflow.md         产品级 E2E 流程：P0 委托 → P7 持续追踪 + 人机分工 + 9 道质量闸门
+│   │   ├── data-layer.md               六张表结构 + V1–V8 + CLI 契约；§8 讲清「拆解这步：确定性留在 ar、判断交给模型」
 │   │   ├── output-html-template.md     HTML 输出模板：git式占比条 + 账号库页面 + 数据图（暖白纸张底/松绿/陶土 token + DOM工程卫生清单）
 │   │   └── practitioner-review.md      从业者审视八轴 + 账号领域 I/J 补充轴实例化（落地镜）
-│   ├── examples/                  v0.2 真实 case：数字生命卡兹克-对标拆解报告.md（判决 🧪 先验证）
+│   ├── examples/                  真实 case：数字生命卡兹克-对标拆解报告.md（判决 🧪 先验证）+ 3 份详情页拆解
 │   └── 账号库台账.md               只追加不改写
-├── src/parser/                    P3 解析器（产品化第一个组件）：本地 HTML → 结构化数据表
-├── web/                           副端 PC Web 工具（纯客户端解析；触发条件见其 README，暂占位）
-├── tests/                         验收测试（代码入库，fixtures 指向 ../account/ 不入库）
-├── docs/                          产品工程文档（路线图 / ADR）
-└── data/                          结构化数据输出（gitignore）
+├── agent/account-analyst.md        Agent 契约：七条禁止 + 动作自治上限 + 评估证据
+├── src/account_research/           确定性处理层（Python 标准库，零依赖）：解析 / 六张表 / V1–V8 / 统计 / 图片通道 / 拆解编排
+├── src/parser/                     P3 解析器早期落点（保留作参考实现）
+├── extension/                      浏览器扩展：详情页一键存档（替代 Ctrl+A → 记事本 → 存盘）
+├── tools/                          运维小工具：待采优先级板、列名体检、书签小工具源码
+├── web/                            副端 PC Web 工具（纯客户端解析；触发条件见其 README，暂占位）
+├── tests/                          196 个验收测试（代码入库，fixtures 指向 ../account/ 不入库）
+├── docs/                           产品工程文档：方向卡、PRD、case 复盘、图片通道、Agent 运行记录
+└── data/                           六张结构化表 + debrief 运行产物（gitignore）
 ```
 
 > **为什么它是特例**：`account-research` 已按产品立项调研判决「Skill 先行、Web 放大」（见 [`docs/product-research-account-research-2026-10-21.md`](docs/product-research-account-research-2026-10-21.md)），从方法论 Skill 成长为一个产品项目——目录结构按「可供扩展的产品项目」组织，方法论收进 `skill/` 子目录。其余 Skill 新增时仍放 `skills/<name>/`；某个 Skill 将来也要产品化时，提升条件与登记方式见 [`AGENTS.md`](AGENTS.md) §1/§3。

@@ -7,14 +7,15 @@
 
 | 目录 | 装什么 | 状态 |
 |---|---|---|
-| `skill/` | **方法论**：SKILL.md 九步主干 + 红线 + 输出格式；references/（指标字典、采集手册、E2E 流程、数据层、HTML 模板、落地镜）；examples/（真实 case）；账号库台账（只追加） | v0.3.1：九步之后新增「落库」环节，方法论开始指挥 CLI |
-| `src/account_research/` | **确定性处理层**（Python 标准库，零依赖）：`ar probe/parse/validate/stats/add/selftest`——存档解析、六张表、V1–V8 校验器、统计；`ar images` 图片通道（正文在图上时的取字路径，OCR 依赖可选） | ✅ v0.1.0 已对真实存档跑通（32 篇 / 置顶 2 / 样本 30）；图片通道对 5 篇真实详情页跑通（5–26 图/篇） |
+| `skill/` | **方法论**：SKILL.md 九步主干 + 红线 + 输出格式；references/（指标字典、采集手册、E2E 流程、数据层、HTML 模板、落地镜）；examples/（真实 case）；账号库台账（只追加） | v0.3.3：九步之后的「落库」升级为 `ar debrief` 一键拆解，方法论开始指挥宿主 runtime |
+| `src/account_research/` | **确定性处理层**（Python 标准库，零依赖）：`ar probe/parse/validate/stats/add/selftest/ingest/debrief`——存档解析、六张表、V1–V8 校验器、统计、拆解编排；`ar images` 图片通道（正文在图上时的取字路径，OCR 依赖可选） | ✅ v0.1.0 已对真实存档跑通（32 篇 / 置顶 2 / 样本 30）；图片通道对 5 篇真实详情页跑通（5–26 图/篇）；`debrief` 两次真跑落库 |
 | `agent/` | **Agent 契约**（八项必填 + 动作自治上限 + 5 条评估） | 草稿（缺「备份联系人」；契约见其文件） |
 | `web/` | **副端 PC Web 工具**：纯客户端解析（File API，数据不出浏览器）+ 静态托管 | 占位，未启动（触发条件见其 README） |
-| `tests/` | 验收测试：158 个单测（合成 fixture）+ `ar selftest` 真实存档回归 | ✅ 全绿 |
+| `extension/` | **浏览器扩展**：详情页一键存档（替代 Ctrl+A → 记事本 → 存盘） | 可用，见其 README |
+| `tests/` | 验收测试：196 个单测（合成 fixture）+ `ar selftest` 真实存档回归 | ✅ 全绿 |
 | `docs/` | 产品工程文档：方向卡、PRD、case 复盘、Agent 运行记录 | 见其 README |
 | `data/` | 结构化数据（六张 CSV，gitignore，仅本地） | —— |
-| `../account/` | 采集原始存档（仓库根，gitignore，仅本地） | 本地在（卡兹克 4 份 + 3 份无效存档） |
+| `../account/` | 采集原始存档（仓库根，gitignore，仅本地） | 本地在（卡兹克 6 份详情页 + 主页存档 + 图片） |
 
 ## 当前进度（2026-10-26）
 
@@ -40,9 +41,23 @@ python account-research/ar.py images --ocr     # + OCR 落 account/notes-text/<n
 | 阶段 | 载体 | 人的操作 | 自动化部分 | 状态 |
 |---|---|---|---|---|
 | S0（已完成） | Skill（AI 对话驱动） | 存 HTML + 打包给 AI | 解析 → 拆解 → 判决 → 渲染 | ✅ |
-| **S1（当前）** | CLI 数据层（本地表） | 存 HTML → `ar parse` | 解析 → 校验 → 统计 → 落库 | ✅ 跑通 |
-| S2 | 工作台调 `dsh headless` | 同上 | + 一键拆解、产物回填 | 未开始 |
-| S3 | 采集提效（粘贴/截图入口 → 插件） | 更省力的采集 | + 归属校验前置 | 未开始 |
+| **S1（已完成）** | CLI 数据层（本地表） | 存 HTML → `ar ingest` | 解析 → 校验 → 统计 → 落库（正文与图上文字一次落盘） | ✅ 跑通 |
+| **S2（已完成）** | `ar debrief` 调 `dsh headless` | 存 HTML → `ar debrief --account <id>` | + 一键拆解、产物先待审再 `--commit` 落库 | ✅ 两次真跑 |
+| S3 | 采集提效（粘贴/截图入口 → 插件） | 更省力的采集 | + 归属校验前置 | 部分（`extension/` 可用了） |
+| S4 | 可视化（Web / HTML 视图） | 点开看 | + 同源渲染 | 未开始 |
+
+## 一键拆解（S2，2026-11-01 起）
+
+```bash
+python account-research/ar.py debrief --account <id> --dry-run   # 只看任务，不落盘不调模型
+python account-research/ar.py debrief --account <id>             # 真跑 → payload.json 待复核
+python account-research/ar.py debrief --account <id> --replay <payload.json> --commit  # 改完重走闸门并落库
+```
+
+分工的判据只有一条：**确定性的活留在代码里，只有归纳判断交给模型**。统计、列名、闸门、落库都在 `ar` 这一侧；
+模型侧运行时被关掉网络、shell、写文件权限（`tool-fs` 只留 read），结论只能从 stdout 交回。
+默认不落库是因为 append-only 表没有回滚——先写后校验的代价是脏行永久留下。详见
+[`skill/references/data-layer.md`](skill/references/data-layer.md) §8。
 
 ## 使用
 

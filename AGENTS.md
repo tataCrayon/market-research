@@ -46,7 +46,7 @@ skills/<name>/references/*.md      该 Skill 的深度资料（清单、字段�
 skills/<name>/examples/*.md        该 Skill 的真实产出样例（至少一份）
 skills/_template/SKILL.md          新 Skill 的空模板（复制即用）
 account/                           采集原始存档（gitignore，仅本地；account-research 项目用）
-account-research/                  产品项目（形态特例，见 §1）：skill/ 方法论 + src/ 工程 + web/ 副端 + tests/ + docs/ + data/
+account-research/                  产品项目（形态特例，见 §1）：skill/ 方法论 + src/ 工程 + agent/ 契约 + extension/ 采集扩展 + web/ 副端 + tests/ + docs/ + data/
 ```
 
 **命名**：`<领域>-research`，全小写连字符。例：`app-market-research`、`game-research`、`career-research`。
