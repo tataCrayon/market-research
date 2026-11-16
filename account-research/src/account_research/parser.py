@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import schema
+from .counts import to_count
 from .initialstate import Archive, iter_note_cards
 
 _TZ = timezone(timedelta(hours=schema.TZ_OFFSET_HOURS))
@@ -26,13 +27,14 @@ def ms_to_date(value: Any) -> str:
 
 
 def as_int(value: Any) -> int | None:
-    """互动数在存档里是字符串。取值失败返回 None（= ⬜），不做任何补齐。"""
-    if value is None or value == "":
-        return None
-    try:
-        return int(float(str(value).replace(",", "")))
-    except (TypeError, ValueError):
-        return None
+    """互动数在存档里是字符串。取值失败返回 None（= ⬜），不做任何补齐。
+
+    `1.2万` 这类圆整值要被换算成整数——主页卡片的 `likedCount` 目前都是纯数字
+    （实测 160 张卡片全部可解析），但搜索结果里出现过 `"likedCount":"3.4万"`，
+    说明平台会这么给。换算规则统一放在 `counts.py`，这里不再留第二份实现。
+    换算后的值是**近似值**，逐篇引用时须标 `≈`（见 `counts.parse_count`）。
+    """
+    return to_count(value)
 
 
 def form_of(card: dict[str, Any]) -> str:

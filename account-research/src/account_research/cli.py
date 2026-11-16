@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import sys
@@ -15,8 +16,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from . import alerts as alert_rules
 from . import schema, store
 from .board import render_board
+from .counts import parse_count, to_count
 from .debrief import (
     TARGET_TABLES,
     DebriefError,
@@ -24,6 +27,7 @@ from .debrief import (
     build_runtime_patch,
     build_task,
     check_payload,
+    collect_date_overrides,
     collect_snapshot,
     drop_empty_rows,
     extract_payload,
@@ -45,10 +49,18 @@ from .images import (
     ocr_file,
     render_text,
 )
+from . import attempts as attempts_module
+from . import close as close_rules
+from . import host as host_module
+from . import hostsetup as hostsetup_module
+from . import matrix, mhtml as mhtml_module, report
+from .attempts import describe as describe_attempt
+from .attempts import attempts_by_note, missing_columns, summarize as summarize_attempts
 from .initialstate import REJECT_REASONS, ArchiveError, iter_note_cards, open_archive
 from .parser import parse_account, parse_blocks, parse_notes
 from .stats import summarize
-from .tokens import build_index as build_token_index, note_url
+from . import tokens as tokens_module
+from .tokens import build_index_with_source as build_token_index, note_url, token_age_days
 from .validate import validate_dir, validate_tables
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -118,6 +130,21 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--ledger", default=str(DEFAULT_LEDGER))
     record.set_defaults(func=cmd_record)
 
+    close_parser = sub.add_parser(
+        "close", help="结案一条假设（到期未验 / 已证伪 / 已证实）——追加一行，不改历史"
+    )
+    close_parser.add_argument("table", choices=["hypothesis"], help="目前只支持 hypothesis")
+    close_parser.add_argument("hypothesis_id", help="要结案的那条假设，如 H-KZK-01")
+    close_parser.add_argument("--status", required=True,
+                              choices=list(schema.HYPOTHESIS_CLOSED),
+                              help="结案状态；超期未验必须配 --note")
+    close_parser.add_argument("--note", default="", help="为什么结案（超期未验必填）")
+    close_parser.add_argument("--on", default=today(), help="结案日期（写入 recorded_on）")
+    close_parser.add_argument("--data", default=str(DEFAULT_DATA))
+    close_parser.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    close_parser.add_argument("--dry-run", action="store_true", help="只打印将要写入的行")
+    close_parser.set_defaults(func=cmd_close)
+
     paste = sub.add_parser("parse-text", help="解析书签小工具产出的 ===AR-NOTE-v1=== 块")
     paste.add_argument("--file", required=True)
     paste.add_argument("--on", default=today())
@@ -170,6 +197,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="不读存档里的 xsec_token（生成的链接很可能 404）")
     links.add_argument("--text-dir", default="",
                        help="正文归档目录；默认 account/notes-text（测试用临时目录）")
+    links.add_argument("--on", default=today(),
+                       help="判断 token 新鲜度用的日期；默认今天")
     links.add_argument("--out", default="", help="写成 markdown 文件；默认只打印")
     links.set_defaults(func=cmd_links)
 
@@ -188,6 +217,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status", help="进度总览：采了多少、还差多少、卡在哪")
     status.add_argument("--data", default=str(DEFAULT_DATA))
+    status.add_argument("--ledger", default=str(DEFAULT_LEDGER))
     status.add_argument("--account", default="")
     status.set_defaults(func=cmd_status)
 
@@ -201,7 +231,17 @@ def build_parser() -> argparse.ArgumentParser:
     watch = sub.add_parser("watch", help="守着采件箱：文件一落进来就自动入库（Ctrl+C 停）")
     watch.add_argument("--path", default=str(DEFAULT_INBOX))
     watch.add_argument("--interval", type=float, default=3.0, help="轮询间隔秒（默认 3）")
-    watch.add_argument("--on", default=today())
+    # 默认 None = **入库那一刻**才取日期。原来默认值在这里就固定了，
+    # 开着过夜会把第二天的采集全记成第一天（采集日期是所有对账的基准）。
+    watch.add_argument("--on", default=None,
+                       help="采集日期；省略=入库那一刻的当天（推荐，开着过夜也不会记错）")
+    watch.add_argument("--settle", type=float, default=1.0,
+                       help="文件修改后等这么多秒再动它，避免读到下载了一半的文件（默认 1）")
+    watch.add_argument("--pattern", action="append", default=None, metavar="GLOB",
+                       help="只认匹配这个通配符的文件（可重复，或用逗号分隔）。"
+                            "例：`--pattern \"ar-page-*\" --pattern \"* - 小红书.html\"`")
+    watch.add_argument("--once", action="store_true",
+                       help="扫一遍就退出（放进定时任务 / 测试用）")
     watch.add_argument("--new-authors", action="store_true",
                        help="作者不在库里时自动建占位账号（默认拒收）")
     watch.add_argument("--data", default=str(DEFAULT_DATA))
@@ -209,6 +249,26 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--text-dir", default="",
                        help="正文归档目录；默认 account/notes-text（测试用临时目录）")
     watch.set_defaults(func=cmd_watch)
+
+    host = sub.add_parser(
+        "host",
+        help="本地宿主：注册一次，之后扩展点一下就直接入库（不用再开终端）",
+    )
+    host.add_argument("--register", action="store_true",
+                      help="注册到 Chrome（写注册表 + 生成启动脚本与清单）")
+    host.add_argument("--unregister", action="store_true",
+                      help="从 Chrome 注销，并删掉生成的两个文件")
+    host.add_argument("--doctor", action="store_true",
+                      help="逐项体检 + 真启一次宿主握手，指出哪一环断了")
+    host.add_argument("--run", action="store_true",
+                      help="直接跑协议循环（Chrome 会通过生成的 .bat 调它，一般不用手敲）")
+    host.add_argument("--data", default=str(DEFAULT_DATA),
+                      help="入库写到哪个数据目录（默认 data/）")
+    host.set_defaults(func=cmd_host)
+
+    ext = sub.add_parser("extension", help="扩展的安装状态与安装说明")
+    ext.add_argument("--status", action="store_true", help="列出扩展目录与宿主注册状态")
+    ext.set_defaults(func=cmd_extension)
 
     debrief = sub.add_parser("debrief", help="一键拆解：拼任务 → 交给 dsh headless → 产物收回本地待审")
     debrief.add_argument("--account", default="", help="account_id；省略=库里只有唯一账号时自动选")
@@ -228,6 +288,32 @@ def build_parser() -> argparse.ArgumentParser:
                          help="不调模型，直接拿已有的 payload.json 重走检查与落库")
     debrief.add_argument("--k", default="3,5", help="爆文率 K 值，逗号分隔")
     debrief.set_defaults(func=cmd_debrief)
+
+    report_parser = sub.add_parser(
+        "report", help="把四张结论表渲染成一份人能从头读的 markdown 报告"
+    )
+    report_parser.add_argument("--account", default="",
+                               help="account_id；省略=库里只有唯一账号时自动选")
+    report_parser.add_argument("--data", default=str(DEFAULT_DATA))
+    report_parser.add_argument("--text-dir", default="", help="正文目录；默认 account/notes-text")
+    report_parser.add_argument("--out", default="", help="输出路径；省略=打印到终端")
+    report_parser.add_argument("--notes-limit", type=int, default=0,
+                               help="逐篇表最多显示几行（0=全显示，不影响任何统计）")
+    report_parser.add_argument("--on", default=today(), help="渲染日期（写进报告头）")
+    report_parser.add_argument("--k", default="3,5", help="爆文率 K 值，逗号分隔")
+    report_parser.set_defaults(func=cmd_report)
+
+    matrix_parser = sub.add_parser(
+        "matrix", help="跨账号矩阵视图 → 单文件 HTML（无脚本、无外链、断网可开）"
+    )
+    matrix_parser.add_argument("--account", action="append", default=[],
+                                help="只渲染指定账号（可重复）；省略=库里全部账号")
+    matrix_parser.add_argument("--data", default=str(DEFAULT_DATA))
+    matrix_parser.add_argument("--text-dir", default="", help="正文目录；默认 account/notes-text")
+    matrix_parser.add_argument("--out", default="", help="输出 HTML 路径；省略=打印到终端")
+    matrix_parser.add_argument("--on", default=today(), help="数据截至日（写进页头）")
+    matrix_parser.add_argument("--k", default="3,5", help="爆文率 K 值，逗号分隔")
+    matrix_parser.set_defaults(func=cmd_matrix)
     return root
 
 
@@ -381,13 +467,23 @@ def _detail_rows(args: argparse.Namespace, updates: list[dict[str, Any]], allow_
             base.update({
                 "account_id": account_id, "note_id": note_id, "pinned": "0",
                 "title": str(item.get("title") or ""), "form": str(item.get("form") or ""),
-                "human_note": "来源=详情页 HTML；发布时间未取证（页面只显示相对时间）",
+                # 🔧 2026-11-03：这里原来无条件写「发布时间未取证」。
+                # detail 通道现在能从 state 拿到绝对时间戳，硬写那句话就成了假话。
+                # 拿不到才写 ⬜，拿得到就留空（下面的字段循环会填）。
+                "human_note": "" if str(item.get("published_at") or "").strip()
+                else "来源=详情页 HTML；发布时间未取证（页面只显示相对时间）",
             })
         else:
             account_id = str(base.get("account_id") or account_id)
         routed[account_id] = routed.get(account_id, 0) + 1
         row = dict(base)
-        for field in ("likes", "collects", "comments", "shares", "duration", "human_note"):
+        # `published_at` 也进来了：只在**新行**且详情页给得出绝对时间时才写。
+        # 已有行的发布时间以主页存档为准——那是列表页服务端渲染的原值，
+        # 而且详情页读到的时分秒已经被我们截断成日期，不该回头覆盖更早的观测。
+        fill_fields = ["likes", "collects", "comments", "shares", "duration", "human_note"]
+        if base is None or not str(base.get("published_at") or "").strip():
+            fill_fields.append("published_at")
+        for field in fill_fields:
             if str(item.get(field) or "").strip():
                 row[field] = item[field]
         row.update({
@@ -456,29 +552,74 @@ def _merged_notes(args: argparse.Namespace) -> list[dict[str, Any]]:
 def _missing_fields(row: dict[str, Any], include_shares: bool = False) -> list[str]:
     """缺口只算「藏 / 评」。
 
-    分享数在多数笔记页根本拿不到（报告里三篇深拆的分享全 ⬜）。把它算进缺口，
+    分享数在多数笔记页根本拿不到（DOM 里只有图标）。把它算进缺口，
     清单会永远清不完——**永远清不完的清单等于没有清单**。
+    （2026-11-03 起分享数能从 state 拿到，但它仍是「有更好、没有不阻塞」的字段，
+    所以仍默认不计入缺口；要补时用 `ar fill` 多打一个数字即可。）
+
+    ⚠️ `0` 不是缺口。零评论的笔记现在会被判成 `"0"`（页面有「这是一片荒地」空态占位，
+    见 `detail._resolve_zero_comments`）——用 `str(row.get(col) or "")` 判空时，
+    `"0"` 是真值不会被误判，但**空字符串与 None 才该算缺**。这里显式写清楚，
+    免得后来人顺手改成 `int(...) or ...` 把 0 变成假值。
     """
     labels = {"collects": "藏", "comments": "评"}
     if include_shares:
         labels["shares"] = "分享"
-    return [label for col, label in labels.items() if not str(row.get(col) or "").strip()]
+    return [label for col, label in labels.items() if not _has_count(row.get(col))]
+
+
+def _has_count(value: Any) -> bool:
+    """单元格里有没有一个真实计数。`0` 有，`⬜` / 空 / None 没有。"""
+    return str(value if value is not None else "").strip() not in ("", "⬜")
+
+
+def _like_key(row: dict[str, Any]) -> int:
+    """按点赞降序排——但**绝不让一个解析不了的计数把整条命令崩掉**。
+
+    实测：`1.2万` 曾经让 `ar gaps` / `ar links` 直接
+    `ValueError: invalid literal for int()`。清单类命令的全部价值是「告诉人去点哪几篇」，
+    它不该因为一个单元格的写法而彻底不可用——排不出来的沉到最后，其余照常输出。
+    """
+    return to_count(row.get("likes")) or 0
+
+
+def _show_count(value: Any) -> str:
+    """清单里展示计数：圆整值带 `≈`，空值 `?`。
+
+    为什么不直接打印原串 `1.2万`：清单是给人决定「先点哪一篇」的，
+    要能一眼比大小；但也不能把 ≈12,000 写成 12,000 —— 那是在替平台编精度。
+    """
+    parsed = parse_count(value)
+    return parsed.text() if parsed else "?"
 
 
 def cmd_gaps(args: argparse.Namespace) -> int:
-    """告诉人「该去补哪几篇」——采集效率的一半在减少盲目点击。"""
-    rows = [row for row in _merged_notes(args) if _missing_fields(row)]
-    rows.sort(key=lambda row: -int(str(row.get("likes") or 0)))
+    """告诉人「该去补哪几篇」——采集效率的一半在减少盲目点击。
+
+    **每条缺口都带「上次是怎么试的」**（2026-11-04 起）：只有「缺什么」，
+    「从没试过」和「试过但平台不给」在屏幕上长得一模一样，而这两者的处理完全相反
+    ——前者去采，后者别浪费时间。这个区别曾经被固化错过一次：
+    三份文档写着「评论一条都采不到」，而 11 篇存档里 95 条评论原文一直都在，
+    错误来源只是一次 `grep comment-item` 没命中。见 `attempts.py` 的模块说明。
+    """
+    merged = _merged_notes(args)
+    rows = [row for row in merged if _missing_fields(row)]
+    rows.sort(key=lambda row: -_like_key(row))
     if not rows:
         print("没有缺口：所有篇目的藏/评/分享都已入库。")
         return 0
+    attempts = attempts_by_note(store.read_table(args.data, "notes"))
     shown = rows[: args.limit] if args.limit else rows
     print(f"缺藏/评的篇目：{len(rows)} 篇（按点赞降序，先补最能解释量级的）")
-    print("注：分享数多数拿不到，不计入缺口；要一并补用 `ar fill` 时多打一个数字即可。\n")
+    print("注：分享数多数拿不到，不计入缺口；要一并补用 `ar fill` 时多打一个数字即可。")
+    missing_by_note = {str(row.get("note_id")): missing_columns(row) for row in rows}
+    print(summarize_attempts(attempts, missing_by_note) + "。\n")
     for index, row in enumerate(shown, start=1):
-        print(f"{index:>2}. 赞 {str(row.get('likes') or '?'):>6} | 缺 {'/'.join(_missing_fields(row))}"
+        note_id = str(row.get("note_id"))
+        print(f"{index:>2}. 赞 {_show_count(row.get('likes')):>8} | 缺 {'/'.join(_missing_fields(row))}"
               f" | {row.get('published_at') or '?'} | {row.get('title') or '(无标题)'}")
-        print(f"    note_id={row.get('note_id')}")
+        print(f"    note_id={note_id}")
+        print(f"    {describe_attempt(attempts.get(note_id), missing_columns(row), today())}")
     if len(shown) < len(rows):
         print(f"\n（共 {len(rows)} 篇，用 --limit 0 看全部）")
     print("\n下一步：`ar fill` 逐篇口播补数，或点书签复制块后用 `ar parse-text`。")
@@ -492,7 +633,7 @@ def cmd_fill(args: argparse.Namespace) -> int:
     变成静默错数据。人眼读三个数字是 3 秒的事，错了能立刻发现。
     """
     rows = [row for row in _merged_notes(args) if _missing_fields(row)]
-    rows.sort(key=lambda row: -int(str(row.get("likes") or 0)))
+    rows.sort(key=lambda row: -_like_key(row))
     targets = rows[: args.limit] if args.limit else rows
     if not targets:
         print("没有缺口，无需补数。")
@@ -539,7 +680,8 @@ def cmd_links(args: argparse.Namespace) -> int:
     """
     rows = _merged_notes(args)
     text_dir = _image_text_root(args)
-    tokens = build_token_index([REPO_ROOT / "account"]) if not args.no_tokens else {}
+    index = build_token_index([REPO_ROOT / "account"]) if not args.no_tokens else {}
+    tokens = {note_id: entry.token for note_id, entry in index.items()}
     pending: list[tuple[dict[str, Any], bool, str]] = []
     for row in rows:
         note_id = str(row.get("note_id") or "")
@@ -552,7 +694,7 @@ def cmd_links(args: argparse.Namespace) -> int:
         if not _missing_fields(row) and has_text:
             continue
         pending.append((row, has_text, tokens.get(note_id, "")))
-    pending.sort(key=lambda triple: -int(str(triple[0].get("likes") or 0)))
+    pending.sort(key=lambda triple: -_like_key(triple[0]))
     if args.limit:
         pending = pending[: args.limit]
     if not pending:
@@ -564,13 +706,26 @@ def cmd_links(args: argparse.Namespace) -> int:
     numbers_done_no_body = sum(
         1 for row, has_text, _ in pending if not has_text and not _missing_fields(row)
     )
+    # token 的**年龄**决定它还能不能打开。只报「带 token 54/56」是不够的：
+    # 那个数字把「有 token」说成了「能打开」，而实测拿着它点开是 404（2026-11-12）。
+    ages = [
+        token_age_days(entry.collected_on, args.on)
+        for entry in index.values() if entry.collected_on
+    ]
+    fresh_days = min(ages) if ages else None
+    stale = fresh_days is not None and fresh_days > tokens_module.TOKEN_STALE_DAYS
     lines = [
         "# 待采详情页清单",
         "",
         "用法：**右键链接 → 在新标签页中打开**（不要从主页点开弹层）→ 等加载完 →"
-        " Ctrl+S 选「**网页，全部**」（选「仅 HTML」会丢掉图，而图文笔记的正文常在图上）",
-        "→ 全部存完丢进 `account/inbox/` → `python account-research/ar.py ingest`"
-        " → `python account-research/ar.py images --ocr`",
+        " Ctrl+C 或 Ctrl+S 两种存法任选（见下）",
+        "",
+        "**存法 A（推荐，最省事）**：装 `extension/` 里的浏览器扩展，点一下就把当前页存进"
+        " `account/inbox/`——它只读你**已经打开的页面**，不发任何额外请求。",
+        "**存法 B（手动）**：Ctrl+S 选「**网页，全部**」→ 存进 `account/inbox/`。"
+        "⚠️ 别选「仅 HTML」：图文笔记的正文常常只排版在图上。",
+        "",
+        "存完跑：`python account-research/ar.py ingest`（解析 + 归档正文 + 图上文字一次做完）",
         "",
         f"共 {len(pending)} 篇。其中 {need_body} 篇还没有正文"
         + (f"（含 {numbers_done_no_body} 篇赞/藏/评已齐、只缺正文的——"
@@ -578,13 +733,41 @@ def cmd_links(args: argparse.Namespace) -> int:
            if numbers_done_no_body else "")
         + f"。链接带 token：{with_token}/{len(pending)}。",
         "",
+    ]
+    if stale:
+        lines += [
+            f"> 🚫 **这批链接大概率打不开**：token 是从 {fresh_days} 天前的存档里读出来的，"
+            f"平台按会话发 token，超过 {tokens_module.TOKEN_STALE_DAYS} 天基本失效。",
+            "> **别从这里点**。正确做法：打开该账号主页 → 点进那一篇 →"
+            " 用扩展或 Ctrl+S 存。**主页路径永远带新鲜 token。**",
+            f"> 要重新生成能打的链接：先按 Ctrl+S 存一份主页，再跑一次 `ar links`。",
+            "",
+        ]
+    lines += [
         "> ⚠️ token 是从你已保存的存档里读出来的，**会过期**。若某篇打开后跳到 404"
         "（error_code=300031），说明 token 失效——回该账号主页点进那篇即可（永远带新 token）。",
         "",
         "| # | 赞 | 标题 | 状态 | 链接 |",
         "|---|---|---|---|---|",
     ]
-    for index, (row, has_text, token) in enumerate(pending, start=1):
+    attempts = attempts_by_note(store.read_table(args.data, "notes"))
+    tried_before = sum(
+        1 for row, _, _ in pending if str(row.get("note_id")) in attempts
+    )
+    if tried_before:
+        # 插在「⚠️ token 会过期」之前（索引 11 是那条说明的起始位置）。
+        # 早先写死 11 时清单短一行就会插到表格中间，把 markdown 表撑坏——用插入点定位。
+        anchor = next(
+            index for index, line in enumerate(lines) if line.startswith("> ⚠️ token")
+        )
+        lines.insert(
+            anchor,
+            f"> 🔁 其中 **{tried_before} 篇以前采过详情页**但没拿到全部数字。"
+            f"那说明「试过」不等于「拿得到」——也说明**别默认它拿不到**："
+            f"超过 {attempts_module.RETRY_AFTER_DAYS} 天的结论要重新验证（平台会改版）。"
+            f"逐条历史用 `ar gaps` 看。",
+        )
+    for number, (row, has_text, token) in enumerate(pending, start=1):
         note_id = str(row.get("note_id"))
         title = str(row.get("title") or "(无标题)").replace("|", "／")
         lacks = _missing_fields(row)
@@ -594,11 +777,13 @@ def cmd_links(args: argparse.Namespace) -> int:
             status = "已齐"
         elif lacks:
             status = "未采" + ("（无 token）" if not token else "")
+            if note_id in attempts:
+                status = "未采（上次试过）" + ("（无 token）" if not token else "")
         else:
             status = "数字齐，**缺正文**"
-        likes = str(row.get("likes") or "?")
+        likes = _show_count(row.get("likes"))
         lines.append(
-            f"| {index} | {likes} | {title} | {status} | {note_url(note_id, token)} |"
+            f"| {number} | {likes} | {title} | {status} | {note_url(note_id, token)} |"
         )
 
     text = "\n".join(lines) + "\n"
@@ -615,6 +800,9 @@ def cmd_links(args: argparse.Namespace) -> int:
         print(f"已写入 {target} 与看板 {board_path}（{len(pending)} 篇，带 token {with_token} 篇）")
         if with_token < len(pending):
             print(f"⚠️ {len(pending) - with_token} 篇没有 token：打开可能 404，回主页点进去最稳。")
+        if stale:
+            print(f"🚫 token 来自 {fresh_days} 天前的存档，大概率已失效——"
+                  f"别从清单里点，回主页点进那篇再存。")
         print(f"打开看板：start {board_path}    或双击该文件")
         return 0
     print(text)
@@ -627,6 +815,9 @@ def _account_label(args: argparse.Namespace) -> str:
     return " / ".join(names)
 
 
+INGEST_SUFFIXES = (".html", ".htm", ".txt", ".md", ".mhtml", ".mht")
+
+
 def _collect_candidates(paths: list[str]) -> tuple[list[Path], list[Path]]:
     """展开输入：目录取里面待处理的文件，文件直接用。返回 (候选文件, 新建的目录)。"""
     candidates: list[Path] = []
@@ -635,7 +826,7 @@ def _collect_candidates(paths: list[str]) -> tuple[list[Path], list[Path]]:
         path = Path(raw)
         if path.is_dir():
             candidates.extend(
-                sorted(p for p in path.iterdir() if p.is_file() and p.suffix.lower() in (".html", ".htm", ".txt", ".md"))
+                sorted(p for p in path.iterdir() if p.is_file() and p.suffix.lower() in INGEST_SUFFIXES)
             )
         elif path.is_file():
             candidates.append(path)
@@ -643,6 +834,40 @@ def _collect_candidates(paths: list[str]) -> tuple[list[Path], list[Path]]:
             path.mkdir(parents=True, exist_ok=True)
             created.append(path)
     return candidates, created
+
+
+def _expand_mhtml(candidates: list[Path]) -> list[Path]:
+    """把候选里的 MHTML 就地拆成 `HTML + _files/`，再用 HTML 继续走原管道。
+
+    为什么在**入口处**拆而不让下游认 MHTML：`images.py` / `detail.py` / OCR 全部
+    按「HTML + `_files/` 同目录」工作，那条路上已经有图与笔记的绑定（含 note_id 校验）、
+    平台声明张数对账、孤立目录反查救援。**新格式在边界被翻译成旧形状**，
+    比让旧管道长出第二条腿安全得多——两份逻辑迟早对不上，而对不上时不会报错。
+
+    拆完删掉源 `.mhtml`：否则 inbox 里同时躺着 `x.mhtml` 和 `x.html`，
+    下次 ingest 会把它当两份不同的存档各入库一次（图表里出现重复行）。
+    """
+    result: list[Path] = []
+    for path in candidates:
+        if path.suffix.lower() not in mhtml_module.MHTML_SUFFIXES and not mhtml_module.looks_like_mhtml(path):
+            result.append(path)
+            continue
+        try:
+            html_path, parts = mhtml_module.convert(path)
+        except (ValueError, OSError) as exc:
+            print(f"❌ {path.name}：MHTML 拆不开——{exc}")
+            print("   这份文件会被跳过，其余照常处理。")
+            continue
+        print(f"📦 {path.name} → {html_path.name} + {html_path.stem}_files/（{parts} 个子资源）")
+        if parts == 0:
+            print("   ⚠️ 这份 MHTML 里**一个子资源都没有**：图很可能没被打包进去，"
+                  "这篇的图上文字会缺（正文仍然入库）。")
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        result.append(html_path)
+    return result
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
@@ -656,6 +881,10 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     candidates, created = _collect_candidates([str(p) for p in roots])
     for path in created:
         print(f"采件箱目录已创建：{path}\n把存档 HTML / 书签复制的 txt 丢进来，再跑一次。")
+    # MHTML 在**入口处**就被翻译成「HTML + `_files/`」——下游一个字都不用改。
+    # 为什么不让下游认 MHTML：图与笔记的绑定（含 note_id 校验）、平台声明张数对账、
+    # 孤立目录反查救援全都长在那条路上了，重写一遍等于把踩平的坑再踩一次。
+    candidates = _expand_mhtml(candidates)
     if not candidates:
         if not created:
             print("采件箱是空的：%s" % "、".join(str(p) for p in roots))
@@ -677,12 +906,17 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 continue
             if not archive.usable:
                 if archive.kind == "note_detail":
-                    fields = extract_detail(archive.html)
+                    # detail 通道现在两条腿走路：state 给分享数/发布日/视频秒数，DOM 给正文。
+                    # 只传 html 会静默丢掉那三样——所以 archive.state 必须一起给。
+                    fields = extract_detail(archive.html, archive.state)
                     if fields.note_id:
                         block_items.append(fields.as_row_updates())
                         handled.append(path)
                         print(f"✅ {path.name}：详情页 note_id={fields.note_id}"
-                              f"（赞 {fields.likes or '⬜'} / 藏 {fields.collects or '⬜'} / 评 {fields.comments or '⬜'}）")
+                              f"（赞 {fields.count_text('likes')} / 藏 {fields.count_text('collects')}"
+                              f" / 评 {fields.count_text('comments')}"
+                              f" / 分享 {fields.count_text('shares')}）")
+                        _report_conflicts(fields)
                         _archive_body(fields, _image_text_root(args))
                         detail_ready.append(path)
                         continue
@@ -720,7 +954,12 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         print("\n没有可入库的文件。")
         return 1
 
-    if detail_ready and not args.no_ocr:
+    # ⚠️ 用 `getattr` 而不是 `args.no_ocr`：`cmd_watch` 会自己拼一个 Namespace
+    # 传给本函数，它没有 `no_ocr` 这个字段。直接取属性会抛 `AttributeError`——
+    # 而 `if detail_ready and ...` 的短路求值让这个 bug **只在有详情页时才触发**：
+    # 主页存档（detail_ready 为空）一切正常，所以原有测试全绿，`ar watch` 却在
+    # 每篇详情页上崩一次。2026-11-13 端到端跑 `ar watch` 才发现。
+    if detail_ready and not getattr(args, "no_ocr", False):
         _ingest_ocr(detail_ready, roots[0], _image_text_root(args))
 
     archive_dir = (roots[0] if roots[0].is_dir() else roots[0].parent) / "processed" / args.on
@@ -768,8 +1007,14 @@ def cmd_parse_detail(args: argparse.Namespace) -> int:
         if not path.is_file():
             print(f"❌ 找不到 {path}")
             continue
-        html = path.read_text(encoding="utf-8", errors="replace")
-        fields = extract_detail(html)
+        # 必须走 open_archive 拿 state：分享数 / 发布日 / 视频秒数只在 state 里。
+        try:
+            archive = open_archive(path)
+        except ArchiveError as exc:
+            print(f"⏭  {path.name}：{exc}")
+            continue
+        html = archive.html
+        fields = extract_detail(html, archive.state)
         if not fields.note_id:
             if '<h1' in html and 'detail-title' in html:
                 print(f"⏭  {path.name}：{REJECT_REASONS['profile_saved_as_detail']}")
@@ -778,12 +1023,15 @@ def cmd_parse_detail(args: argparse.Namespace) -> int:
                       f"（多半是从主页点开弹层后存的，存下来的是主页）。")
             continue
         print(f"✅ {path.name}")
-        print(f"   note_id={fields.note_id} | 赞 {fields.likes or '⬜'} / 藏 {fields.collects or '⬜'}"
-              f" / 评 {fields.comments or '⬜'} | 形式 {fields.form or '?'}"
-              + (f" | 时长 {fields.duration}" if fields.duration else ""))
+        print(f"   note_id={fields.note_id} | 赞 {fields.count_text('likes')}"
+              f" / 藏 {fields.count_text('collects')} / 评 {fields.count_text('comments')}"
+              f" / 分享 {fields.count_text('shares')} | 形式 {fields.form or '?'}"
+              + (f" | 时长 {fields.duration}" if fields.duration else "")
+              + (f" | 发布 {fields.published_at}" if fields.published_at else ""))
         print(f"   标题：{fields.title or '⬜'}")
         print(f"   标签：{' '.join(fields.tags) or '⬜'}")
         print(f"   正文前 60 字：{fields.body[:60] or '⬜'}")
+        _report_conflicts(fields)
         if fields.missing:
             print(f"   ⚠️ 未取到：{fields.missing}（保持 ⬜，不估算）")
         archived = _archive_body(fields, text_root)
@@ -793,6 +1041,17 @@ def cmd_parse_detail(args: argparse.Namespace) -> int:
     if not updates:
         return 1
     return _detail_rows(args, updates, allow_new=True)
+
+
+def _report_conflicts(fields: Any) -> None:
+    """两条通道给出不同数字时**必须喊出来**。
+
+    静默取一个的后果不是报错，是「同一篇笔记在报告和表里显示不同的赞数」——
+    到那一步已经分不清哪个是对的，而两个数字都长得一样合理。
+    """
+    conflicts = getattr(fields, "conflicts", None) or {}
+    for name, detail in conflicts.items():
+        print(f"   ⚠️ {name} 两条通道不一致（{detail}）：取 state，DOM 可能是改版后的新结构")
 
 
 def _archive_body(fields: Any, text_root: Path) -> str:
@@ -815,10 +1074,16 @@ def _archive_body(fields: Any, text_root: Path) -> str:
     target = target_dir / f"{fields.note_id}.txt"
     paragraphs = getattr(fields, "paragraphs", ()) or (fields.body,)
     body_text = "\n\n".join(paragraphs)
+    # 头部用**换算后的展示形式**：`1.2万` 这种圆整值要带 ≈，否则下游读 txt 时
+    # 会把它当精确数字引用出去。标题行之外的行都以 `#` 开头，字数统计会自动跳过。
+    counts = " / ".join(
+        getattr(fields, "count_text", lambda _name: "⬜")(name)
+        for name in ("likes", "collects", "comments")
+    )
     header = (
         f"# {fields.title}\n"
         f"# 标签：{' '.join(fields.tags)}\n"
-        f"# 赞/藏/评：{fields.likes}/{fields.collects}/{fields.comments}\n"
+        f"# 赞/藏/评：{counts}\n"
         f"# 段落数：{len(paragraphs)}\n\n"
     )
     existing = target.read_text(encoding="utf-8") if target.is_file() else ""
@@ -830,6 +1095,48 @@ def _archive_body(fields: Any, text_root: Path) -> str:
               f"**保留原样**；新内容另存 {shrunken.name}")
         return ""
     target.write_text(header + body_text, encoding="utf-8")
+    _write_comments(fields, target_dir)
+    return str(target)
+
+
+def _write_comments(fields: Any, text_root: Path) -> str:
+    """把**首屏**评论另存 `<note_id>.comments.txt`，一条一行、不摘要。
+
+    为什么单独一个文件而不塞进正文 txt：正文是「他写了什么」，评论是「读者回了什么」，
+    两个证据层混在一个文件里，下游读正文时会被评论区带偏（字数、段落数全错）。
+
+    为什么保存原文而不再做摘要：摘要是转述，转述进不了 ② 级证据。
+    真正做人群画像时要的是「原话里的身份词」，摘要恰恰会把它抹平。
+
+    ⚠️ 文件名带 `comments` 后缀，`ar gaps` 的「有正文」判定只认 `<id>.txt`，不受影响。
+    """
+    comments = getattr(fields, "comments_list", ()) or ()
+    zeros = getattr(fields, "zeros", {}) or {}
+    if not comments:
+        # 确认零评论的也要落一个文件：否则「这篇真没人评」和「这篇没采」
+        # 在磁盘上长得一模一样，`ar gaps` 会把前者永远列进待补清单（E19 同源）。
+        if "comments" not in zeros:
+            return ""
+        target = text_root / f"{fields.note_id}.comments.txt"
+        target.write_text(
+            f"# {fields.title}\n"
+            f"# 声明评论数：0 | 本文件是**确认零评论**，不是没采到\n"
+            f"# 判据：{zeros['comments']}\n",
+            encoding="utf-8",
+        )
+        return str(target)
+    target = text_root / f"{fields.note_id}.comments.txt"
+    declared = getattr(fields, "count_text", lambda _n: "⬜")("comments")
+    lines = [
+        f"# {fields.title}",
+        f"# 声明评论数：{declared} | 本文件是**首屏**抓到的 {len(comments)} 条，不是全部",
+        f"# 抓取口径：详情页存档 DOM（人工 Ctrl+S），未点「加载更多」",
+        "",
+    ]
+    for index, comment in enumerate(comments, 1):
+        meta = " ".join(part for part in (comment.meta, comment.location) if part)
+        lines.append(f"{index}. [{comment.author or '匿名'}{'｜' + meta if meta else ''}] {comment.text}")
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return str(target)
 
 
@@ -979,26 +1286,54 @@ def cmd_images(args: argparse.Namespace) -> int:
     if not rows:
         print("没有识别到详情页存档（og:url 里要有 /explore/<id>）。")
         return 1
-    rows.sort(key=lambda row: -row["note"].total)
+    # 排序：张数多的在前；同一篇有多份存档时，**本地图多的那份排前面**。
+    # 这样「最全的那份」总是先被 OCR，缺图的旧存档自然落到「跳过」分支——
+    # 少跑一次无用的 OCR，也避免 images.txt 先被缺图的写一遍再被覆盖。
+    rows.sort(key=lambda row: (-row["note"].total, -row["note"].local))
     if args.limit:
         rows = rows[: args.limit]
 
     print(f"=== 图片通道：{len(rows)} 篇详情 ===")
     print("图片只从本地 `_files/` 读，不发任何网络请求；图不会进模型上下文。\n")
+    # 同一篇笔记可能有好几份存档（重存一次就多一份）。**必须说清哪份是完整的那份**，
+    # 否则人只能靠猜，而猜的结果是拿旧的、缺图的去拆——这是 2026-11-13 实测遇到的。
+    seen: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        seen.setdefault(row["note"].note_id, []).append(row)
+    duplicates = {k: v for k, v in seen.items() if len(v) > 1}
     for row in rows:
         note = row["note"]
         declared = "" if note.declared is None else f" / 平台声明 {note.declared}"
-        print(f"{note.note_id} | 图 {note.total:>2}（本地 {note.local}{declared}）"
-              f"| 正文 {row['text_chars']} 字 | {row['path'].name[:36]}")
+        # 同一篇有多份存档时，标出「这份是不是最全的」——重存一次就会多一份，
+        # 而旧的那份可能是缺图的。不标，人只能靠文件名猜。
+        tag = ""
+        group = duplicates.get(note.note_id)
+        if group:
+            best = max(group, key=lambda item: (item["note"].local, item["path"].stat().st_mtime))
+            if best["path"] == row["path"] and note.local > 0:
+                tag = "  ← 这份最全，用它"
+            elif note.local < best["note"].local:
+                tag = f"  ← 旧存档（少 {best['note'].local - note.local} 张图），别用"
+        print(f"{note.note_id} | 图 {note.total}（本地 {note.local}{declared}）"
+              f"| 正文 {row['text_chars']} 字 | {row['path'].name[:36]}{tag}")
         if note.incomplete:
-            print(f"   ⚠️ 绑到的张数少于平台声明（{note.total} < {note.declared}）：**我们漏了图**，"
-                  f"要修解析，别把这份当成完整正文")
+            # 判据是 **local** 对 declared，不是 total——见 `NoteImages.incomplete`。
+            # 说「16 < 16」会让人以为代码算错了，其实是「枚举到 16 张、只有 3 张有文件」。
+            print(f"   ⚠️ **落到本地的**少于平台声明（本地 {note.local} < 声明 {note.declared}）："
+                  f"上面这些图里有一部分没存下来，别把这份当成完整正文")
         if note.missing():
-            print(f"   ⬜ 未落到本地：图 {note.missing()[:8]}（这份存档当时可能只选了「仅 HTML」）")
+            print(f"   ⬜ 未落到本地：图 {note.missing()[:8]}"
+                  f"{'…' if len(note.missing()) > 8 else ''}"
+                  f"（懒加载的图要滚动到那一张才会被存进存档）")
         if note.local == 0:
             print("   ⬜ 这批一张图都没有：重新 Ctrl+S 时选「网页，全部」才带图")
             continue
         if engine is None:
+            continue
+        # 同一篇有多份存档时**只给最全的那份跑 OCR**：后跑的会覆盖 `images.txt`，
+        # 让缺图的旧存档覆盖掉完整的，正是这轮踩的坑。
+        if group and note.local < max(item["note"].local for item in group):
+            print("   ⏭ 跳过 OCR：这篇有更全的存档，用它跑出来的才作数")
             continue
         summary = _ocr_note(row["path"], row["html"], text_root, engine, root)
         if summary:
@@ -1048,6 +1383,149 @@ def cmd_quota(args: argparse.Namespace) -> int:
     return 0
 
 
+def _match_pattern(name: str, patterns: Sequence[str]) -> bool:
+    """文件名通配符匹配（大小写不敏感）。
+
+    为什么不用 `Path.glob`：这里要按**单个文件名**过滤，不是遍历；
+    而且 Windows 上用户很可能写成 `AR-PAGE-*`，大小写不该成为坑。
+
+    多个 pattern 是「或」的关系：一次采集里大概率同时有扩展存的 `.mhtml`
+    和手动 Ctrl+S 的 `… - 小红书.html`，只给一个白名单必然漏掉一类。
+    """
+    lowered = name.lower()
+    return any(fnmatch.fnmatch(lowered, pattern.lower()) for pattern in patterns)
+
+
+def _split_patterns(raw: Sequence[str] | None) -> list[str]:
+    """`--pattern` 可重复、也可逗号分隔——两种写法都收，避免人猜。"""
+    patterns: list[str] = []
+    for item in raw or ():
+        for piece in str(item).split(","):
+            piece = piece.strip()
+            if piece:
+                patterns.append(piece)
+    return patterns
+
+
+def _print_watch_setup(inbox: Path, patterns: Sequence[str]) -> None:
+    """打印「怎么让它全自动」——这段是给人照着抄的，不是日志。"""
+    print("   ── 怎么让它全自动 ──")
+    print()
+    print("   扩展存的文件名固定是 `ar-page-<note_id>.mhtml`，所以最稳的做法是")
+    print("   盯下载目录 + 只认这个前缀，Chrome 设置一个字都不用改：")
+    print()
+    print(r'     python ar.py watch --path "%USERPROFILE%\Downloads"'
+          r' --pattern "ar-page-*"')
+    print()
+    print("   这样你其他的正常下载一个都不会被收走。")
+    print("   只按后缀过滤是不够的：别人的 `xxx.html` 也是 `.html`。")
+    print()
+    print(f"   当前监视：{inbox}")
+    if patterns:
+        print(f"   白名单：{'、'.join(patterns)}（大小写不敏感）")
+    else:
+        print("   白名单：没设 —— 该目录下所有 HTML/TXT 都会被收（下载目录请务必设）")
+    print(f"   认的格式：{'/'.join(x.lstrip('.') for x in INGEST_SUFFIXES)}；"
+          "其余文件不删、不挪、不报错。")
+    print()
+
+
+def cmd_host(args: argparse.Namespace) -> int:
+    """本地宿主：注册 / 注销 / 体检 / 跑协议循环。
+
+    ## 为什么要有这个命令
+
+    在此之前，「点扩展图标」只是把 MHTML 存到下载目录，然后**必须另开一个终端**
+    跑 `ar watch` 才算入库。用户的原话：
+
+    > 我们应该是一整个插件包含采集能力，现在听起来是多个进程分散了
+
+    宿主就是那条把两边缝起来的线：扩展通过原生消息把字节直接交给它，
+    它再走 `ar ingest` 的同一条代码路径。于是「点一下」就是全部动作。
+
+    ## 注册只做两件事，但两件事都不能省
+
+    1. 写 `HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\<name>`（不用管理员权限）；
+    2. 生成一个 `.bat` 与一份清单 JSON。
+
+    `.bat` 不是多余的：Chrome 启动宿主时**参数表为空**，把脚本路径写进 `path` 字符串
+    是不会被解析的（整串会被当文件名）。所以必须有一个可执行文件自己知道要跑哪个脚本。
+    """
+    paths = hostsetup_module.HostPaths.under(REPO_ROOT / "account-research")
+
+    if getattr(args, "run", False):
+        # Chrome 通过生成的 .bat 走这条路。手敲也能用：它从 stdin 读帧。
+        return host_module.main()
+
+    if getattr(args, "register", False):
+        written = hostsetup_module.register(paths)
+        print("✅ 已注册本地宿主")
+        print(f"   注册表：{paths.registry_key}")
+        print(f"   清单  ：{paths.manifest}")
+        print(f"   启动  ：{paths.launcher}")
+        print(f"   扩展 ID：{paths.extension_id}")
+        print()
+        print("接下来两步（只做一次）：")
+        print("   1. Chrome → chrome://extensions → 打开「开发者模式」→「加载已解压的扩展程序」")
+        print(f"      → 选中 {REPO_ROOT / 'account-research' / 'extension'}")
+        print("   2. 打开几篇笔记 → 点扩展图标。badge 显示 ✓N 就是入库了。")
+        print()
+        print("验证：`python ar.py host --doctor`")
+        return 0 if written else 1
+
+    if getattr(args, "unregister", False):
+        removed = hostsetup_module.unregister(paths)
+        if not removed:
+            print("本来就没注册过（注册表项与两个文件都不在）。")
+            return 0
+        print("✅ 已注销，删掉了：")
+        for item in removed:
+            print(f"   {item}")
+        return 0
+
+    # 默认动作是体检：人跑到这里，十次有九次是「连不上」。
+    checks = hostsetup_module.diagnose(paths)
+    print("=== 本地宿主体检 ===")
+    for passed, detail in checks:
+        print(f"   {'✅' if passed else '❌'} {detail}")
+    print()
+    ok, detail = hostsetup_module.roundtrip(paths)
+    print(f"   {'✅' if ok else '❌'} {detail}")
+    print()
+    if all(passed for passed, _ in checks) and ok:
+        print("全部通过：扩展点一下就会直接入库，不需要再开终端。")
+        return 0
+    print("有项目没过。按上面的 ❌ 逐条修，然后重跑本条命令。")
+    if not any(passed for passed, _ in checks):
+        print("从这一条开始：`python ar.py host --register`")
+    return 1
+
+
+def cmd_extension(args: argparse.Namespace) -> int:
+    """扩展的安装状态：目录在哪、宿主注册了没、Chrome 里加载了没。"""
+    extension_dir = REPO_ROOT / "account-research" / "extension"
+    manifest_path = extension_dir / "manifest.json"
+    paths = hostsetup_module.HostPaths.under(REPO_ROOT / "account-research")
+    print("=== 扩展 ===")
+    if not manifest_path.is_file():
+        print(f"❌ 找不到 {manifest_path}")
+        return 1
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    print(f"   目录：{extension_dir}")
+    print(f"   版本：{manifest.get('version')}")
+    print(f"   权限：{'、'.join(manifest.get('permissions', []))}")
+    print(f"   ID  ：{paths.extension_id}")
+    print()
+    registered = hostsetup_module.current_registration(paths)
+    print("=== 宿主 ===")
+    print(f"   {'✅ 已注册 → ' + registered if registered else '❌ 没注册（跑 `python ar.py host --register`）'}")
+    print()
+    print("=== Chrome 里加载它 ===")
+    print("   chrome://extensions → 开发者模式 → 加载已解压的扩展程序 → 选上面那个目录")
+    print("   （已经加载过的话，改完代码点一次「重新加载」）")
+    return 0
+
+
 def cmd_watch(args: argparse.Namespace) -> int:
     """守着采件箱，文件落地即入库。
 
@@ -1056,28 +1534,65 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     为什么值得做：逐篇采时最烦的不是点图标，是**每采一篇要回终端跑一次命令**。
     有了它，你可以一次采 10 篇，全程不看终端。
+
+    ## 三个让它「真的能一直开着」的细节（2026-11-13 补）
+
+    1. **日期在入库那一刻才取**，不在启动时取。原来 `--on` 的默认值在
+       `build_parser()` 里算好，于是**开着过夜，第二天采的全被记成昨天**——
+       采集日期是本项目所有对账的基准，错一天会让「同日额度」「D1 到期」全部算错。
+    2. **等文件写完再动它**（`--settle`，默认 1 秒）。浏览器下载大文件时，
+       文件会先出现再慢慢写完；这时去读会读到**半份 HTML**，
+       而半份 HTML 往往还能被解析成「合法但残缺」的笔记——**静默错数据**。
+       判据用 mtime：文件的修改时间距今不足 `settle` 秒就先不碰。
+    3. **`--once` 扫一遍就退出**。有它才能把这件事放进定时任务，
+       也才能在测试里确定性地验证「落地即入库」。
     """
     inbox = Path(args.path)
     inbox.mkdir(parents=True, exist_ok=True)
-    suffix_ok = (".html", ".htm", ".txt", ".md")
+    settle = float(getattr(args, "settle", 1.0))
+    once = bool(getattr(args, "once", False))
+    # `--pattern` 是为「直接把 Chrome 下载目录设成采件箱」准备的：
+    # 那个目录里全是用户的正常下载，只按后缀过滤太容易误收（一份别人发来的 .html 也算）。
+    patterns = _split_patterns(getattr(args, "pattern", None))
     seen: set[str] = set()
     ingested = 0
+    failed = 0
+
+    def scan() -> list[Path]:
+        """挑出「看起来已经写完」的候选文件。"""
+        now = time.time()
+        ready: list[Path] = []
+        for path in sorted(inbox.iterdir()):
+            if not path.is_file() or str(path) in seen:
+                continue
+            if path.suffix.lower() not in INGEST_SUFFIXES:
+                continue  # 下载目录里常有别的文件，一律不碰（不删、不挪、不报错）
+            if patterns and not _match_pattern(path.name, patterns):
+                continue
+            try:
+                if now - path.stat().st_mtime < settle:
+                    continue  # 还在写，下一轮再说
+            except OSError:
+                continue
+            ready.append(path)
+        return ready
+
     print(f"👀 正在监视 {inbox}")
-    print(f"   每 {args.interval:g} 秒扫描一次；文件落进来就自动入库。Ctrl+C 停止。")
-    print("   把 Chrome 的下载目录设成这个文件夹，采完就不用再管了。\n")
+    print(f"   每 {args.interval:g} 秒扫描一次；文件落进来就自动入库。"
+          + ("扫一遍就退出。" if once else "Ctrl+C 停止。"))
+    print()
+    _print_watch_setup(inbox, patterns)
     try:
         while True:
-            pending = [
-                p for p in sorted(inbox.iterdir())
-                if p.is_file() and p.suffix.lower() in suffix_ok and str(p) not in seen
-            ]
-            for path in pending:
+            for path in scan():
                 seen.add(str(path))
                 if not path.is_file():
                     continue
                 print(f"── 发现 {path.name}")
                 sub_args = argparse.Namespace(
-                    path=[str(path)], on=args.on, data=args.data, ledger=args.ledger,
+                    # 日期在这里才取：开着过夜也不会把第二天的采集记成第一天。
+                    path=[str(path)], on=args.on or today(), data=args.data,
+                    ledger=args.ledger,
                     new_authors=getattr(args, "new_authors", False),
                     text_dir=getattr(args, "text_dir", ""),
                 )
@@ -1090,12 +1605,17 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     ingested += 1
                     print()
                 else:
+                    failed += 1
                     print("（文件留在原地，修好后再跑）\n")
+            if once:
+                break
             time.sleep(args.interval)
     except KeyboardInterrupt:
-        print(f"\n已停止。本次自动入库 {ingested} 个文件。")
-        print("跑 `ar status` 看当前进度。")
-        return 0
+        print()
+    print(f"本次自动入库 {ingested} 个文件"
+          + (f"，{failed} 个失败" if failed else "")
+          + "。跑 `ar status` 看当前进度。")
+    return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -1139,17 +1659,47 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"校验：{len(errors)} ERROR / {len(issues) - len(errors)} WARN"
           + ("（有错误，先修再继续）" if errors else " ✅"))
     print()
+    _report_alerts(args)
     quota = _quota_line(args.data)
     if quota:
         print(quota)
+    # 采集端的路怎么走，取决于宿主注册了没。**这是「下一步」该说的话**，
+    # 而不是让人去翻文档猜「到底要不要开个终端」。
+    host_ready = bool(hostsetup_module.current_registration(
+        hostsetup_module.HostPaths.under(REPO_ROOT / "account-research")))
     if pending_files:
         print("下一步：`ar ingest` 把采件箱里的文件入库。")
+    elif host_ready:
+        print("下一步：打开几篇笔记（图片栏滑到底）→ 点扩展图标。**会自己入库，不用开终端**。")
     elif missing:
-        print("下一步：`ar links --limit 5 --out account-research/data/todo-detail.md` 拿待采清单，"
-              "逐篇打开后 Ctrl+S，再 `ar ingest`。")
+        print("下一步：`ar links --limit 5 --out account-research/data/todo-detail.md` 拿待采清单。")
+        print("       采集方式二选一：")
+        print("       · 点扩展图标（推荐）—— 但要先跑一次 `python ar.py host --register`")
+        print("       · 逐篇 Ctrl+S（「网页，全部」）→ `ar ingest`")
     else:
         print("下一步：数据齐了，可以跑拆解（`ar add verdicts` 等四张表）。")
     return 0
+
+
+def _report_alerts(args: argparse.Namespace) -> None:
+    """打印纪律告警（到期未复核 / 假设逾期 / 台账断流）。
+
+    为什么放进 `status`：这是唯一一个「每次坐下都会跑」的命令。
+    单独做个 `ar alerts` 的话，它会变成「知道有、但从不跑」的第二条命令——
+    E11 的教训：一件事要两条命令，第二条就永远不会跑。
+    """
+    alerts = alert_rules.collect(
+        store.read_table(args.data, "verdicts"),
+        store.read_table(args.data, "hypotheses"),
+        args.ledger or DEFAULT_LEDGER,
+        today(),
+    )
+    if not alerts:
+        return
+    print(f"⚠️ 纪律告警 {len(alerts)} 条：")
+    for alert in alerts:
+        print(f"  [{alert.code}] {alert.message}")
+    print()
 
 
 def _quota_line(data_dir: str | Path) -> str:
@@ -1175,6 +1725,118 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 1 if errors else 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    """把四张结论表渲染成 markdown——**报告不再手写**。
+
+    为什么必须有这条命令：前两份报告（卡兹克、知新）都是手抄数字、手排版式的，
+    每拆一个新号就要重抄一遍，而手抄会漂（实测把 27/31 写成 29/31，读起来完全合理）。
+    命令化之后「改表即改报告」，版式与口径只维护一处。
+
+    默认**打印到终端**而不是直接写文件：先让人看一眼，`--out` 才落盘。
+    与 `ar debrief` 默认不落库同理——自动产物要先过人的眼睛。
+    """
+    text_dir = _image_text_root(args)
+    account_id = args.account or _only_account(Path(args.data))
+    k_values = tuple(int(part) for part in str(args.k).split(",") if part.strip())
+    try:
+        data = report.collect(Path(args.data), account_id, text_dir, today=args.on, k_values=k_values)
+    except ValueError as exc:
+        print(f"❌ {exc}")
+        return 1
+    text = report.render(data, notes_limit=args.notes_limit)
+    if args.out:
+        target = Path(args.out)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        print(f"已写入 {target}（{len(text)} 字）")
+        print(f"  findings {len(data.findings)} | playbook {len(data.playbook)}"
+              f" | hypotheses {len(data.hypotheses)} | verdicts {len(data.verdicts)}")
+        return 0
+    print(text)
+    return 0
+
+
+def cmd_matrix(args: argparse.Namespace) -> int:
+    """跨账号矩阵视图（S4）。
+
+    为什么要一条独立命令而不是塞进 `ar report`：两者回答的问题不同——
+    `report` 是**单账号纵深**（这个号能不能抄），`matrix` 是**跨账号横切**
+    （这个领域谁在做什么、哪条打法被验证过几次）。硬合成一页会让
+    「单账号结论」和「跨账号规律」混在一起，而后者恰恰是样本不够时最容易被编出来的东西。
+
+    所以本命令**拒绝在 <2 个账号时给跨账号结论**：页面照出，但 §4 会明写「未达成」。
+    """
+    text_dir = _image_text_root(args)
+    k_values = tuple(int(part) for part in str(args.k).split(",") if part.strip())
+    accounts = args.account or [
+        str(row.get("account_id")) for row in store.read_table(args.data, "accounts")
+        if str(row.get("account_id") or "").strip()
+    ]
+    if not accounts:
+        print("❌ accounts 表里没有账号——先 `ar parse` 或 `ar ingest`。")
+        return 1
+    reports = []
+    for account_id in accounts:
+        try:
+            reports.append(report.collect(Path(args.data), account_id, text_dir,
+                                          today=args.on, k_values=k_values))
+        except ValueError as exc:
+            print(f"❌ {exc}")
+            return 1
+    data = matrix.collect(reports, args.data, today=args.on)
+    text = matrix.render(data)
+    if args.out:
+        target = Path(args.out)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        crossed = sum(
+            1 for row in data.playbook
+            if matrix.support_count(row.get("supporting_accounts")) >= matrix.CROSS_ACCOUNT_THRESHOLD
+        )
+        print(f"已写入 {target}（{len(text)} 字，{len(data.accounts)} 个账号）")
+        print(f"  打法 {len(data.playbook)} 条，其中跨号验证 {crossed} 条")
+        if not crossed:
+            print("  ⚠️ Q2 未达成：没有一条打法在 ≥2 个账号上验证过")
+        print(f"打开：start {target}    或双击该文件")
+        return 0
+    print(text)
+    return 0
+
+
+def cmd_close(args: argparse.Namespace) -> int:
+    """结案一条假设。**追加一行新状态，不改任何历史行。**
+
+    为什么必须有这条命令：D2 告警连喊 10 天「证伪或证实都算结案」，
+    而 `ar add hypotheses` 会因键已存在静默跳过（实测「新增 0 行」）——
+    系统要求人做一件命令行做不到的事，守纪律的唯一方式是手改 CSV，而那被明令禁止。
+
+    这条命令只是把「结构上已经允许的事」（`recorded_on` 进键）暴露成一个入口。
+    """
+    rows = store.read_table(args.data, "hypotheses")
+    try:
+        closed = close_rules.close_hypothesis(
+            rows, args.hypothesis_id, args.status, note=args.note, on=args.on
+        )
+    except close_rules.CloseError as exc:
+        print(f"❌ {exc}")
+        return 1
+
+    previous = next(
+        (str(row.get("status") or "") for row in store.latest_hypotheses(rows)
+         if str(row.get("hypothesis_id")) == str(args.hypothesis_id)),
+        "",
+    )
+    print(f"结案 {args.hypothesis_id}：{previous} → {closed['status']}"
+          f"（recorded_on {closed['recorded_on']}）")
+    if closed.get("close_note"):
+        print(f"   理由：{closed['close_note']}")
+    if args.dry_run:
+        print("\n--dry-run：未写入。去掉该参数才落库。")
+        return 0
+    print()
+    return _commit_rows(args, "hypotheses", [closed])
+
+
 def cmd_stats(args: argparse.Namespace) -> int:
     notes = store.read_table(args.data, "notes")
     if not notes:
@@ -1194,7 +1856,23 @@ def cmd_stats(args: argparse.Namespace) -> int:
         print(f"爆文率 K={k}：{data['rate']}%（{data['hits']}/{result.n_sample}，阈值 {data['threshold']}）"
               f"｜定义：{data['definition']}")
     print("⬜ 覆盖度：" + " | ".join(f"{key} {value}" for key, value in result.coverage.items()))
+    _report_approx(result)
     return 0
+
+
+def _report_approx(result: Any) -> None:
+    """把「哪些数字不是精确值」说出来。
+
+    平台上万之后只渲染 `1.2万`，真实值可能是 11,500 也可能是 12,499。这些行参与统计没问题，
+    但报告里逐篇引用时**必须标 ≈**——不标就等于用三位有效数字冒充四位，而且看不出来。
+    解析不了的计数（既不是数字也不是万/K）单独报，因为它真的没被算进样本。
+    """
+    if result.approx_rows:
+        print(f"≈ 其中 {result.approx_rows} 篇的点赞是圆整值（形如「1.2万」，平台只给 3 位有效数字）："
+              f"参与统计，但逐篇引用须标 ≈，不得当精确值写进报告")
+    if result.unparsable:
+        print(f"⚠️ {result.unparsable} 篇的点赞既不是数字也不是「万/K」形态，**已排除出样本**"
+              f"——这不是正常现象，去看这几篇的原始存档")
 
 
 def cmd_add(args: argparse.Namespace) -> int:
@@ -1301,6 +1979,17 @@ def _finish(payload: Any, out_dir: Path, snapshot: Any, account_id: str, args: a
     if dropped:
         print(f"丢弃整行空值 {dropped} 行（模板占位被原样带回来的，不是结论）")
     payload = normalize_rows(payload, account_id, args.on)
+    overrides = collect_date_overrides(payload)
+    if overrides:
+        # 一条一行会刷屏（实测 12 行 findings 就是 12 条一样的警告），
+        # 反而让人不看内容。按「表.列 → 原值」聚合，一眼看得出模型错在哪。
+        grouped: dict[str, set[str]] = {}
+        for table, column, written in overrides:
+            grouped.setdefault(f"{table}.{column}", set()).add(written or "(空)")
+        print(f"⚠️ 日期已按本次拆解日 {args.on} 覆盖（日期是确定性的：它该是「拆解发生在哪天」，"
+              f"不是数据窗口的末日）：")
+        for key, values in grouped.items():
+            print(f"   {key}：模型写成 {'、'.join(sorted(values))}")
     problems = check_payload(payload) + audit_ratios(snapshot, payload)
     if problems:
         rejected = out_dir / "payload.rejected.json"

@@ -1,157 +1,62 @@
-// 后台：把当前窗口里**所有已打开的小红书笔记页**各存一个 txt。
+// 后台（service worker）：**不再执行采集**，只负责图标上那点状态。
 //
-// 【为什么可以批量——这是本次设计的关键论证】
-//   判断标准不是"一次处理几个页面"，而是**这些页面的请求是谁发起的**。
-//   这些标签页全部是你自己一个个点开的：请求在页面加载时就已经发生，由你的浏览行为产生。
-//   本脚本做的事是"把你**已经看过的页面上的文字**存下来"——**零请求、零导航、零新标签**。
+// ## 为什么把采集从这里挪走
 //
-//   被禁止的「批量存档」指的是**程序把页面拉回来**（程序发起请求）；
-//   不被禁止的是「把已经在你眼前的页面存下来」（请求早已由人产生）。
-//   这两件事看起来都叫"批量"，但一个增加请求，一个不增加——差别在于**有没有新的请求产生**。
+// v7.1 把整条采集写在这个文件里，第一次真机点击就失败：
 //
-// 【硬上限 MAX_TABS】不是技术限制，是行为限制：一次开 10 个标签页本身就会形成请求突发，
-//   比人逐篇点更不像正常用户。建议一次开 3–5 个，读完再点一次保存。
+//   转换存档✗ The requested file could not be read, typically due to permission
+//   problems that occur after a reference to a file has been acquired
 //
-// 【为什么必须跳过 discarded / loading 的标签】
-//   Chrome 会把长时间不用的标签"丢弃"（discarded），它此时**不在内存里**。
-//   对丢弃的标签注入脚本，浏览器需要**先把页面重新加载回来**——那才是真的产生了一次请求，
-//   而且是由本扩展触发的。这会把"零请求"这条论证直接击穿。所以必须显式跳过。
-//   同理，status === "loading" 的页面还没渲染完，读到的会是空壳。
+// 那是 `DOMException: NotReadableError`，来自 `blob.arrayBuffer()`。
+// `pageCapture.saveAsMHTML` 返回的**不是一个内存里的 Blob**，而是一个句柄——
+// Chrome 把 MHTML 写进了 profile 的 blob storage，扩展上下文只拿到一个引用。
+// 这种跨进程句柄在 MV3 的 service worker 里读不稳：worker 随时可能被回收，
+// 而且它**没有渲染进程那套 File API**。
 //
-// 【不做什么】不发网络请求、不导航、不开新 tab、不点页面上的平台控件、不读 cookie/storage。
+// 所以采集挪到了弹出面板（`popup.js` + `capture.js`，普通扩展页面 = 真渲染进程）。
+// 代价是面板一关采集就断，界面上已明说「别关这个面板」。
+// 这是有意换的：**一个会失败的重试成本，比一个「以为在跑其实没跑」的静默失败便宜得多。**
+//
+// ## 那这个文件还留着干什么
+//
+// 1. 面板把 badge 的状态发过来，这里负责画——面板一关 badge 也该留着，那是「刚才成了几篇」的记忆；
+// 2. **兜底**：万一面板加载失败，Chrome 会退回到 `onClicked`，那时的反馈必须仍是可见的，
+//    而不是「点了没反应」（E47）。
+//
+// ⚠️ 本文件**不许**出现 `pageCapture` / `scripting` 调用——它们都属于渲染进程那边。
 
-const MAX_TABS = 10;
-const NOTE_URL_RE = /(?:explore|discovery\/item)\/([0-9a-f]{24})/i;
+const AR_BADGE = "AR_BADGE";
 
-chrome.action.onClicked.addListener(async (tab) => {
-  if (!tab.id) {
-    notify("拿不到当前标签页");
-    return;
-  }
-  let tabs = [];
+const BADGE_COLORS = {
+  ok: "#3F6B4F",
+  err: "#C05B3C",
+  warn: "#7A7440",
+  busy: "#9A948A",
+};
+
+// **即时可见的反馈**：图标上的小字 + 颜色。
+// 只改 tooltip 等于没有反馈——用户不会去悬停一个「点了没反应」的按钮。
+function badge(text, color, title) {
   try {
-    tabs = await chrome.tabs.query({ currentWindow: true, url: "https://www.xiaohongshu.com/*" });
+    chrome.action.setBadgeText({ text: String(text || "") });
+    chrome.action.setBadgeBackgroundColor({ color: BADGE_COLORS[color] || BADGE_COLORS.ok });
   } catch (error) {
-    notify("读取标签页列表失败：" + String((error && error.message) || error));
-    return;
+    // badge 失败不该让整次采集失败。
   }
+  chrome.action.setTitle({ title: String(title || "").slice(0, 200) });
+}
 
-  const candidates = tabs.filter((t) => t.id && NOTE_URL_RE.test(t.url || ""));
-  const targets = candidates.slice(0, MAX_TABS);
-
-  let saved = 0;
-  let needReload = 0;
-  const failures = [];
-  for (const target of targets) {
-    // 丢弃 / 未加载完成的标签一律跳过：注入会触发重新加载 = 我们制造了一次请求。
-    if (target.discarded || target.status === "loading") {
-      needReload += 1;
-      continue;
-    }
-    try {
-      const [result] = await chrome.scripting.executeScript({
-        target: { tabId: target.id },
-        func: collectFromPage,
-      });
-      const payload = result && result.result;
-      if (!payload || !payload.block) {
-        failures.push((target.url || "").slice(0, 60));
-        continue;
-      }
-      const filename = `ar-note-${payload.noteId || "unknown"}.txt`;
-      const url = "data:text/plain;charset=utf-8," + encodeURIComponent(payload.block);
-      await chrome.downloads.download({ url, filename, saveAs: false });
-      saved += 1;
-    } catch (error) {
-      failures.push((target.url || "").slice(0, 60));
-    }
-  }
-
-  const skipped = candidates.length - targets.length;
-  const parts = [`已保存 ${saved} 篇`];
-  if (failures.length) parts.push(`失败 ${failures.length} 篇`);
-  if (needReload) parts.push(`${needReload} 个标签未加载/已休眠，已跳过（避免为它重新加载页面）`);
-  if (skipped > 0) parts.push(`${skipped} 个标签超出单次上限 ${MAX_TABS}`);
-  notify(parts.join("；") + "\n\n下一步：ar watch 会自动入库");
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const kind = String((message && message.type) || "");
+  if (kind !== AR_BADGE) return false;
+  badge(message.text, message.color, message.title);
+  sendResponse({ ok: true });
+  return false;
 });
 
-function notify(message) {
-  chrome.action.setTitle({ title: message.slice(0, 120) });
-  console.log("[AR采集]", message);
-}
-
-// 这个函数会被序列化注入页面执行——必须自包含，不能引用外部变量。
-function collectFromPage() {
-  const BLOCK_START = "===AR-NOTE-v1===";
-  const BLOCK_END = "===END===";
-  const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
-
-  const url = location.href;
-  const idMatch = url.match(/(?:explore|discovery\/item)\/([0-9a-f]{24})/i);
-  const noteId = idMatch ? idMatch[1] : "";
-
-  // 正文容器：优先 #detail-desc（小红书真正的正文节点），再退 .note-scroller。
-  // ⚠️ 2026-10-28 实测踩坑：#noteContainer 在部分页面不存在或只包住外层框架，
-  // 用它当 scope 会把「1/6 作者名 关注」这种页面框架文字当成正文——
-  // body_head 看起来"有内容"，其实一个字正文都没有。所以正文单独取，不靠 scope。
-  const descEl =
-    document.querySelector("#detail-desc") ||
-    document.querySelector(".note-content .desc") ||
-    document.querySelector(".note-scroller");
-  const bodyText = clean(descEl ? descEl.innerText || "" : "");
-
-  const nodes = [
-    document.querySelector("#noteContainer"),
-    document.querySelector(".note-detail-mask .note-container"),
-    document.querySelector("[class*='note-content']"),
-    document.querySelector(".note-scroller"),
-  ].filter(Boolean);
-  const scope = nodes[0] || document.body;
-  const text = clean(scope.innerText || "");
-
-  const title = clean(
-    (document.querySelector("#detail-title") || {}).textContent ||
-      (document.querySelector(".note-content .title") || {}).textContent ||
-      document.title.replace(/ - 小红书.*$/, "")
-  );
-
-  // 互动栏只取原文，不解析数字——选择器一改就会变成静默错数据。
-  const barText = clean(
-    (document.querySelector(".interact-container") || scope).innerText || ""
-  ).slice(0, 120);
-  const candidates = (barText.match(/\d+(?:\.\d+)?\s*[万wW]?/g) || []).slice(0, 8).join(" | ");
-
-  // 作者 id：用来做**归属校验**——一个窗口里混着多个账号的笔记时靠它各归各位。
-  // 选择器抄自「小红书 - 同步开启博主首页」扩展（.author-container .info>a），实测在详情页成立。
-  const authorLink = document.querySelector('.author-container a[href*="/user/profile/"]');
-  const authorMatch = (authorLink ? authorLink.href : "").match(/\/user\/profile\/([0-9a-f]{24})/i);
-  const authorId = authorMatch ? authorMatch[1] : "";
-  const authorName = clean(
-    (document.querySelector(".author-container .username") || {}).textContent || ""
-  );
-
-  const video = scope.querySelector("video");
-  const mmss = text.match(/\b(\d{1,2}:\d{2})\b/);
-  const block = [
-    BLOCK_START,
-    "note_id: " + noteId,
-    "title: " + title,
-    "author_id: " + authorId,
-    "author_name: " + authorName,
-    "published: ",
-    "likes: ",
-    "collects: ",
-    "comments: ",
-    "shares: ",
-    "duration: " + (mmss ? mmss[1] : video && video.duration ? String(video.duration) : ""),
-    "human_note: ",
-    "url: " + url.split("?")[0],
-    "raw_len: " + bodyText.length,
-    "body_head: " + bodyText.slice(0, 40),
-    "bar_text: " + barText,
-    "candidates: " + candidates,
-    BLOCK_END,
-  ].join("\n");
-
-  return { block, noteId, authorId, authorName, barText };
-}
+chrome.action.onClicked.addListener(() => {
+  // 正常情况下点图标会打开面板，这里不会触发。
+  // 真触发只有一种可能：面板加载失败。那就必须说清楚，不能安静。
+  badge("!", "err", "面板没能打开 —— 去 chrome://extensions 看这个扩展的报错，"
+    + "或点「重新加载」后再试");
+});

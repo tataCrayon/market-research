@@ -15,7 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from account_research import debrief, schema  # noqa: E402
+from account_research import debrief, schema, store  # noqa: E402
+from account_research.stats import summarize  # noqa: E402
 
 # 「路径 + 图片扩展名」才算诱饵；单纯列扩展名是禁令，必须允许
 IMAGE_PATH_RE = re.compile(r"[\w./\\-]+\.(?:jpg|jpeg|png|webp|gif|bmp|heic)\b", re.IGNORECASE)
@@ -121,6 +122,91 @@ class TestTaskPayload(unittest.TestCase):
         task = debrief.build_task(snapshot, self.data.parent)
         self.assertIn("一篇图上文字都没有", task)
 
+
+class TestBodyGate(unittest.TestCase):
+    """「深拆 3 篇」是验证清单上的硬纪律，代码必须自己说，不能靠模型自觉。
+
+    实测（2026-11-04）：知新那个号 30 篇样本里只有 1 篇有正文，`ar debrief` 首行照样报
+    「样本 30 篇」，一个警告都不打——而一轮真跑要烧 60–114 万 tokens。
+    不出声的代价不是「结果差」，是「结果看起来一样好」：模型会用标题 + 点赞
+    硬写出一份结构拆解，读起来完全合理，而正文根本没读过。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data = Path(self.tmp.name)
+        (self.data / "accounts.csv").write_text(
+            "account_id,nickname,collected_on\nacc1,测试号,2026-10-22\n", encoding="utf-8")
+        self.header = ("account_id,note_id,published_at,title,form,likes,collects,comments,shares,pinned,topic,"
+                       "source_file,source_kind,collected_on,grade,duration,human_note,author_id\n")
+        rows = [f"acc1,n{i},2026-10-0{i},标题{i},图文,{i * 100},,,,,,f.html,公开页,2026-10-22,②,,,"
+                for i in range(1, 7)]
+        (self.data / "notes.csv").write_text(self.header + "\n".join(rows) + "\n", encoding="utf-8")
+        self.text = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        for item in self.text.iterdir():
+            item.unlink()
+        self.text.rmdir()
+        self.tmp.cleanup()
+
+    def _gate(self, bodies: int, images: int = 0) -> str:
+        for i in range(1, bodies + 1):
+            (self.text / f"n{i}.txt").write_text("正文", encoding="utf-8")
+        for i in range(1, images + 1):
+            (self.text / f"n{i}.images.txt").write_text("图上文字", encoding="utf-8")
+        snapshot = debrief.collect_snapshot(self.data, "acc1", self.text)
+        return debrief.render_body_gate(snapshot)
+
+    def test_three_or_more_bodies_pass_quietly(self):
+        gate = self._gate(bodies=3)
+        self.assertIn("满足", gate)
+        self.assertNotIn("⛔", gate)
+        self.assertNotIn("不足", gate)
+
+    def test_two_bodies_is_flagged_as_insufficient(self):
+        gate = self._gate(bodies=2)
+        self.assertIn("⚠️", gate)
+        self.assertIn("不足", gate)
+        self.assertIn("深拆 3 篇", gate)
+
+    def test_zero_readable_text_demands_structure_layer_be_blank(self):
+        """一篇都读不到时，结构层必须整层 ⬜——不许用标题 + 点赞反推结构。"""
+        gate = self._gate(bodies=0)
+        self.assertIn("⛔", gate)
+        self.assertIn("必须整层留 ⬜", gate)
+
+    def test_names_the_readable_notes_so_model_knows_which(self):
+        """光说「只有 2 篇」不够：模型得知道是哪 2 篇，否则它会自己去读整目录（很贵）。"""
+        gate = self._gate(bodies=2)
+        self.assertIn("n1", gate)
+        self.assertIn("n2", gate)
+
+    def test_images_text_counts_as_readable(self):
+        """图上文字和正文是同一层可用文本（R7 之后图只走 OCR），都算「读得到」。
+
+        但要按**篇**取并集，不能把两个数相加：同一篇可能两层都有，相加就重复计数。
+        """
+        gate = self._gate(bodies=1, images=2)          # n1 两层都有 → 并集 2 篇
+        self.assertIn("⚠️", gate)
+        self.assertIn("能读到的文本只有 2 篇", gate)
+
+    def test_union_not_sum_of_layers(self):
+        """1 层正文 + 2 层图上，若其中 1 篇重复，读得到的只有 2 篇而不是 3。
+
+        相加会虚报「达到 3 篇」从而放行一个其实只有 2 篇的结构结论。
+        """
+        gate = self._gate(bodies=1, images=2)
+        self.assertNotIn("满足", gate, "n1 同时有正文与图上文字，不该被数成 3 篇")
+
+    def test_gate_appears_in_task_text(self):
+        for i in range(1, 2):
+            (self.text / f"n{i}.txt").write_text("正文", encoding="utf-8")
+        snapshot = debrief.collect_snapshot(self.data, "acc1", self.text)
+        task = debrief.build_task(snapshot, self.data.parent)
+        self.assertIn("正文可读性闸门", task)
+        self.assertIn("⚠️", task)
+
     def test_task_closes_the_read_surface(self):
         """「该读什么」清单有长度上限，超了就变成暗示「这些都可以读」。
 
@@ -210,6 +296,120 @@ class TestPayloadRecovery(unittest.TestCase):
         self.assertTrue(any("自造字段" in problem for problem in problems))
 
 
+class TestDateIsDeterministic(unittest.TestCase):
+    """`decided_on` / `sampled_on` 是「拆解发生在哪天」——代码知道，模型不知道。
+
+    实测（2026-11-04，知新那轮）：模型自己填了 `2026-10-28`，那是**数据窗口的末日**
+    而不是拆解日（真实是 11-04）。这个错读起来完全合理，也不会让任何校验报错，
+    但它会把判决的到期日整体前移，直接污染「到期该复核」的告警（D1/D2 按 decided_on 算天数）。
+    """
+
+    def test_model_written_date_is_overridden(self):
+        payload = {"verdicts": [{"account_id": "acc1", "decided_on": "2026-10-28", "verdict": "🧪 先验证"}],
+                   "findings": [{"finding_id": "F-1", "sampled_on": "2026-10-28"}],
+                   "playbook": [], "hypotheses": []}
+        debrief.normalize_rows(payload, "acc1", "2026-11-04")
+        self.assertEqual(payload["verdicts"][0]["decided_on"], "2026-11-04")
+        self.assertEqual(payload["findings"][0]["sampled_on"], "2026-11-04")
+
+    def test_override_is_reported_not_silent(self):
+        """静默纠正也是编数据——只不过编的是「模型没写错」这个假象。"""
+        payload = {"verdicts": [{"account_id": "acc1", "decided_on": "2026-10-28"}],
+                   "findings": [], "playbook": [], "hypotheses": []}
+        debrief.normalize_rows(payload, "acc1", "2026-11-04")
+        overrides = debrief.collect_date_overrides(payload)
+        self.assertEqual(overrides, [("verdicts", "decided_on", "2026-10-28")])
+
+    def test_override_does_not_leak_into_row(self):
+        """临时键必须在收集后摘掉，否则会被 check_payload 当成「schema 里没有的列」。"""
+        payload = {"verdicts": [{"account_id": "acc1", "decided_on": "2026-10-28"}],
+                   "findings": [], "playbook": [], "hypotheses": []}
+        debrief.normalize_rows(payload, "acc1", "2026-11-04")
+        debrief.collect_date_overrides(payload)
+        self.assertEqual(set(payload["verdicts"][0]), {"account_id", "decided_on"})
+        self.assertEqual(debrief.check_payload(payload), [])
+
+    def test_correct_date_is_not_reported_as_override(self):
+        payload = {"verdicts": [{"account_id": "acc1", "decided_on": "2026-11-04"}],
+                   "findings": [], "playbook": [], "hypotheses": []}
+        debrief.normalize_rows(payload, "acc1", "2026-11-04")
+        self.assertEqual(debrief.collect_date_overrides(payload), [])
+
+    def test_account_id_is_not_silently_rewritten(self):
+        """账号填错该由 V7 报出来让人看，不该被静默改写——那会把归属错误藏起来。"""
+        payload = {"verdicts": [{"account_id": "wrong", "decided_on": ""}],
+                   "findings": [], "playbook": [], "hypotheses": []}
+        debrief.normalize_rows(payload, "acc1", "2026-11-04")
+        self.assertEqual(payload["verdicts"][0]["account_id"], "wrong")
+
+
+class TestDueOnIsAnchored(unittest.TestCase):
+    """覆盖 `decided_on` 之后必须按**原间隔**重锚 `due_on`。
+
+    实测事故（2026-11-06）：模型写 10-28 判 / 11-04 复核（间隔 7 天），
+    E21 的修复把决定日覆盖成 11-04，`due_on` 没动 → **间隔 0 天**。
+    后果不是报错，是 D1 在判决落库当天就开始喊「到期未复核」——
+    一条永远不可能按时执行的纪律，喊两天就没人看了（E12）。
+
+    覆盖起点不覆盖终点，等于把「他给了 7 天」改写成「他要求当天复核」。
+    """
+
+    def _verdict(self, **extra):
+        row = {"account_id": "acc1", "verdict": "🧪 先验证", "decided_on": "2026-10-28",
+               "due_on": "2026-11-04"}
+        row.update(extra)
+        return {"verdicts": [row], "findings": [], "playbook": [], "hypotheses": []}
+
+    def test_span_is_preserved(self):
+        payload = self._verdict()
+        debrief.normalize_rows(payload, "acc1", "2026-11-06")
+        row = payload["verdicts"][0]
+        self.assertEqual(row["decided_on"], "2026-11-06")
+        self.assertEqual(row["due_on"], "2026-11-13", "7 天的间隔必须保住，不能被压成 0")
+
+    def test_zero_span_stays_zero(self):
+        """模型真要当天复核就保持当天——重锚不是替它改主意。"""
+        payload = self._verdict(due_on="2026-10-28")
+        debrief.normalize_rows(payload, "acc1", "2026-11-06")
+        self.assertEqual(payload["verdicts"][0]["due_on"], "2026-11-06")
+
+    def test_already_correct_date_is_still_reanchored(self):
+        """模型日期没写错时也要重锚？**不要**——日期本身没错，间隔也没变。
+
+        只有 decided_on 被改写才需要动 due_on。这条防的是「无差别平移」，
+        那会把模型给对的到期日也一起挪走。
+        """
+        payload = self._verdict(decided_on="2026-11-06", due_on="2026-11-13")
+        debrief.normalize_rows(payload, "acc1", "2026-11-06")
+        self.assertEqual(payload["verdicts"][0]["due_on"], "2026-11-13")
+
+    def test_empty_due_on_is_not_invented(self):
+        """模型没写 due_on 就是交白卷，不许我们替它编一个。"""
+        payload = self._verdict(due_on="")
+        debrief.normalize_rows(payload, "acc1", "2026-11-06")
+        self.assertEqual(payload["verdicts"][0]["due_on"], "")
+
+    def test_bad_date_is_left_alone(self):
+        """`due_on` 是「下周」这种非日期文本时不动它——V8 会报出来，别在这里猜。"""
+        payload = self._verdict(due_on="下周")
+        debrief.normalize_rows(payload, "acc1", "2026-11-06")
+        self.assertEqual(payload["verdicts"][0]["due_on"], "下周")
+
+    def test_shift_is_reported(self):
+        payload = self._verdict()
+        debrief.normalize_rows(payload, "acc1", "2026-11-06")
+        overrides = debrief.collect_date_overrides(payload)
+        self.assertIn(("verdicts", "due_on", "2026-11-04"), overrides)
+
+    def test_hypotheses_are_not_reanchored(self):
+        """假设表的 `due_on` 是独立填的（可以比拆解日早很多），没有起点可锚。"""
+        payload = {"verdicts": [], "findings": [], "playbook": [],
+                   "hypotheses": [{"hypothesis_id": "H-1", "status": "未验证",
+                                   "due_on": "2026-11-11"}]}
+        debrief.normalize_rows(payload, "acc1", "2026-11-06")
+        self.assertEqual(payload["hypotheses"][0]["due_on"], "2026-11-11")
+
+
 class TestRatioAudit(unittest.TestCase):
     """说的是「某个覆盖字段」的 a/b，分子必须能由表数出来。
 
@@ -245,6 +445,32 @@ class TestRatioAudit(unittest.TestCase):
         counts = debrief.coverage_counts(self.snapshot)
         self.assertEqual((counts["n_sample"], counts["collects"], counts["comments"]), (4, 1, 1))
         self.assertEqual(counts["body"], 0)
+
+    def test_denominator_matches_stats_block(self):
+        """§5 覆盖块与 §4 统计块的「样本 N 篇」必须是同一个数。
+
+        实测（2026-11-04，知新那个号）：§4 报 30、§5 报 31。原因是两边排除规则不同——
+        `stats.summarize` 排了「置顶 + 无点赞」，`coverage_counts` 只排了置顶。
+        于是同一个任务里两个分母，模型引用 a/b 时被迫二选一，闸门又按 §5 判，
+        **两个口径互相打架**。这条钉住它们必须一致。
+        """
+        stats = summarize(store.read_table(self.data, "notes"), "acc1")
+        counts = debrief.coverage_counts(self.snapshot)
+        self.assertEqual(counts["n_sample"], stats.n_sample)
+
+    def test_rows_without_likes_are_not_in_the_denominator(self):
+        """没点赞的行进不了统计，也就不该出现在覆盖分母里——否则分母虚高、覆盖率被低估。
+
+        实测来源：知新那个号有一行「卡兹克做到快100万粉」是详情页顺手建的占位行，
+        点赞为空。它被算进覆盖分母时，§5 报 31 而 §4 报 30。
+        """
+        with (self.data / "notes.csv").open("a", encoding="utf-8") as handle:
+            handle.write("acc1,n5,2026-10-05,e,图文,,,,0,,,f.html,公开页,2026-10-22,②,,,\n")
+        snapshot = debrief.collect_snapshot(self.data, "acc1", self.text)
+        counts = debrief.coverage_counts(snapshot)
+        self.assertEqual(counts["n_sample"], 4, "n5 点赞为空，不该算进分母")
+        self.assertEqual(counts["n_sample"], summarize(
+            store.read_table(self.data, "notes"), "acc1").n_sample)
 
     def test_impossible_ratio_is_caught(self):
         """2/4 数不出来：表里是有收藏 1 / 无收藏 3，没有「2」这个数。"""

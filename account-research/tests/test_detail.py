@@ -48,7 +48,16 @@ class TestDetailExtraction(unittest.TestCase):
         self.assertNotIn("3天前", self.fields.as_row_updates().values())
 
     def test_missing_share_is_reported_not_invented(self):
-        self.assertNotIn("shares", self.fields.as_row_updates())
+        """分享数拿不到时留空，**不编一个数字**。
+
+        🔧 2026-11-03 改了断言口径：原断言是「key 不存在」，现在 `shares` / `published_at`
+        这两个键**恒定存在**（当空串），因为 state 通道能把它们填上、只是这份 fixture 没带
+        state。要考的不是「键在不在」，而是「没证据时值是不是空的」——后者才可证伪。
+        """
+        updates = self.fields.as_row_updates()
+        self.assertEqual(updates["shares"], "")
+        self.assertEqual(updates["published_at"], "")
+        self.assertNotIn("shares", self.fields.sources)
 
 
 class TestDetailClassification(unittest.TestCase):

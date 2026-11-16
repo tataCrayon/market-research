@@ -17,7 +17,15 @@ SOURCE_KINDS = ("公开页", "复制文本", "后台导出", "截图", "第三�
 FORMS = ("图文", "视频", "未知")
 VERDICTS = ("✅ 直接对标", "🔧 部分对标", "🧪 先验证", "⏸ 只观察", "❌ 换对标")
 PAGE_KINDS = ("profile", "note_detail", "search_page", "home_feed", "empty_skeleton", "unknown")
-HYPOTHESIS_STATUS = ("未验证", "验证中", "已证伪", "已证实")
+HYPOTHESIS_STATUS = ("未验证", "验证中", "已证伪", "已证实", "超期未验")
+
+# 「结案」状态：不再计入 D2 逾期告警。
+# `超期未验` 是 2026-11-12 新增的第五个值——起因是发现 PRD §4.1 写着
+# 「到期未验 → 自动降 `已证伪（超期未验）`」，但那份文本既不在枚举里（V6 会拒），
+# 也没有任何命令能写到表里。于是 D2 天天喊「结案」，人却做不到。
+# 单独一个值比塞进「已证伪」诚实：**没做实验 ≠ 被证伪**，
+# 前者是「我不知道」，后者是「我知道它不对」——把两者写成同一个词是在编结论。
+HYPOTHESIS_CLOSED = ("已证伪", "已证实", "超期未验")
 
 # ---- 表结构（顺序即 CSV 列序，禁止随手重排：列序变动会让历史文件错位） ----
 ACCOUNT_COLUMNS = (
@@ -60,6 +68,10 @@ PLAYBOOK_COLUMNS = (
 
 HYPOTHESIS_COLUMNS = (
     "hypothesis_id", "statement", "support", "counter", "experiment", "status", "due_on",
+    # 结案留痕。假设表原来是「一条假设一行、终生不变」，于是**到期后无法结案**：
+    # 键是 `hypothesis_id`，再写一行会被 append-only 静默跳过（实测 0 新增 / 1 跳过）。
+    # `recorded_on` 进键之后，结案 = 追加一行新状态，历史状态仍在表里。
+    "recorded_on", "close_note",
 )
 
 # 追加型表的唯一键：同键不重复写，异键只追加（对应「台账只追加」纪律）
@@ -71,7 +83,10 @@ TABLE_KEYS = {
     "verdicts": ("account_id", "decided_on"),
     "findings": ("finding_id",),
     "playbook": ("action_id",),
-    "hypotheses": ("hypothesis_id",),
+    # `recorded_on` 进键 = 允许「同一条假设的多次状态记录」。
+    # 没有这一列时结案在物理上做不到（同键被跳过），D2 告警因此连续空喊 10 天。
+    # 老行 `recorded_on` 为空，键是 `(id, "")` —— 仍唯一，历史数据不受影响。
+    "hypotheses": ("hypothesis_id", "recorded_on"),
 }
 
 TABLE_COLUMNS = {

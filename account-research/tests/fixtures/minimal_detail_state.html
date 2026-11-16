@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html><head>
+<title>测试详情页（带 state） - 小红书</title>
+<meta property="og:url" content="https://www.xiaohongshu.com/explore/0000000000000000000000f2" />
+<meta property="og:videotime" content="00:15" />
+</head><body>
+<!-- 干扰项：背景推荐流里也有 like-wrapper / count，必须先切交互栏再取数 -->
+<div class="feed-card"><span class="like-wrapper"><span class="count">99999</span></span></div>
+<div class="feed-card"><span class="like-wrapper"><span class="count">88888</span></span></div>
+<div class="note-scroller">
+  <div class="note-content">
+    <h1 id="detail-title" class="title">带 state 的测试详情页</h1>
+    <div id="detail-desc" class="desc">
+      <span class="note-text">第一段正文。</span>
+      <a id="hash-tag" class="tag" href="#">#Kimi</a>
+      <a id="hash-tag" class="tag" href="#">#大模型</a>
+    </div>
+    <div class="bottom-left"><span class="date">3天前 北京</span></div>
+  </div>
+</div>
+<!-- 本笔记互动栏：赞是圆整值 1.2万，与 state 的 12000 是同一件事 -->
+<div class="interact-container">
+  <span class="like-wrapper like-active"><span class="count">1.2万</span></span>
+  <span class="collect-wrapper"><span class="count">3567</span></span>
+  <span class="chat-wrapper"><span class="count">89</span></span>
+  <div class="share-wrapper"><div class="share-icon-container"></div></div>
+</div>
+<!--
+  这份 state 刻意复刻真实详情页的两个坑（2026-11-03 实测）：
+  1. `AiNoteDetailStore` 里带 `new Map([])` —— 不清洗就整份 JSON 解析失败；
+  2. `noteDetailMap` 里混进**别人的**一条（other9），按 note_id 取才不会拿错。
+-->
+<script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{
+  "0000000000000000000000f2":{"note":{"noteId":"0000000000000000000000f2","type":"video",
+    "title":"带 state 的测试详情页","desc":"第一段正文。\n\t\n第二段正文。\n\t\n#Kimi[话题]# #大模型[话题]#",
+    "time":1761000000000,
+    "user":{"userId":"author1","nickname":"测试作者"},
+    "tagList":[{"id":"t1","name":"Kimi","type":"topic"},{"id":"t2","name":"大模型","type":"topic"}],
+    "interactInfo":{"likedCount":"12000","collectedCount":"3567","commentCount":"89","shareCount":"42"},
+    "video":{"capa":{"duration":14},"media":{"video":{"duration":15}}},
+    "imageList":[]}},
+  "111111111111111111111111":{"note":{"noteId":"111111111111111111111111","type":"normal",
+    "title":"别人的笔记","desc":"不该被读到","time":1762000000000,
+    "user":{"userId":"other9","nickname":"别人"},
+    "interactInfo":{"likedCount":"99999","collectedCount":"88888","commentCount":"777","shareCount":"666"},
+    "imageList":[]}}
+}},"AiNoteDetailStore":{"noteDetailMap":new Map([])},"extra":undefined};</script>
+</body></html>

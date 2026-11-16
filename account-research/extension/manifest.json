@@ -1,12 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "AR 采集（account-research）",
-  "version": "2.0.0",
-  "description": "点一下，把当前窗口里所有已打开的小红书笔记页各存一个 txt。不发请求、不导航、不开新页。",
-  "permissions": ["scripting", "downloads"],
+  "name": "小红书对标采集",
+  "version": "7.2.1",
+  "description": "把当前窗口里已打开的小红书笔记页各存一份单文件 MHTML（含图）并直接入库。不发请求、不导航、不开新页。",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsMNLCN1Qi3YTBjvOfblDiTcqf0m+VKQBDEBMg45vK0Nk1nYqrrfR+F77METiEFsLtNfj9DX7ZXrppb7in8gaHNZt/DJr+564Qyy5Eja3Pi8Fzg4m+JQxeELHoCmv6K19X5zuUN1zvhz7MZUFpQJISblG9vDbAq094ztjCFmldx0eRqrRTsV0+yo26fjLsR1i3D1TsIYVTT3yCMGIaVaMCZc4k62zBQ+mvFe+qV29gvYBKi719ZD5Vou8Db7raPbcoCSp+jbWheHcCKz2YjyoCF1GvY7luFuH7fSR2uPYKf58tESUfyzgdeQWr6UGMp7GDBOzPUvOtorD+IRDE5RxYwIDAQAB",
+  "permissions": ["scripting", "pageCapture", "nativeMessaging"],
   "host_permissions": ["https://www.xiaohongshu.com/*"],
   "action": {
-    "default_title": "AR 采集：批量保存当前窗口里所有小红书笔记页",
+    "default_title": "小红书对标采集：把已打开的笔记页存成 MHTML 并入库",
+    "default_popup": "popup.html",
     "default_icon": {
       "16": "icon16.png",
       "48": "icon48.png",

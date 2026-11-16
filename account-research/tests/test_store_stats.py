@@ -100,5 +100,52 @@ class TestStats(unittest.TestCase):
         self.assertEqual(result.coverage["收藏"], "0/1")
 
 
+class TestRoundedCountsInStats(unittest.TestCase):
+    """`1.2万` 进统计：**不许丢行**，而且要知道是哪几行。
+
+    旧实现在 `usable` 那一步用 `_int_or_none(likes) is not None` 过滤，`1.2万` 返回 None，
+    于是整行被静默丢出样本——`n_total` 少一篇、`excluded` 仍是 0、没有一个字提示。
+    丢的还偏偏是破万那几篇，也就是最该被分析的那几篇。
+    """
+
+    def test_rounded_row_stays_in_sample(self):
+        rows = [note("a", 100), note("b", 200), note("c", "1.2万")]
+        result = summarize(rows, "acc1")
+        self.assertEqual(result.n_sample, 3, "破万那篇必须留在样本里，不能被静默丢掉")
+        self.assertEqual(result.n_total, 3)
+
+    def test_rounded_row_counted_with_converted_value(self):
+        rows = [note("a", 1000), note("b", "1.2万")]
+        result = summarize(rows, "acc1")
+        self.assertEqual(result.likes.maximum, 12000)
+        self.assertEqual(result.likes.mean, 6500.0)
+
+    def test_approx_notes_names_the_exact_rows(self):
+        """只给个数字不够用——报告要点名到篇。"""
+        rows = [note("a", 100), note("big", "1.2万"), note("big2", "3.4万")]
+        result = summarize(rows, "acc1")
+        self.assertEqual(result.approx_rows, 2)
+        self.assertEqual(set(result.approx_notes), {"big", "big2"})
+
+    def test_exact_rows_are_not_flagged(self):
+        result = summarize([note("a", 4581)], "acc1")
+        self.assertEqual(result.approx_rows, 0)
+        self.assertEqual(result.approx_notes, ())
+
+    def test_unparsable_is_counted_not_silent(self):
+        """真正解析不了的写法才该出样本，而且**必须报数**。"""
+        rows = [note("a", 100), note("bad", "看主页"), note("bad2", "")]
+        result = summarize(rows, "acc1")
+        self.assertEqual(result.n_sample, 2)      # 空点赞本来就不算可用
+        self.assertEqual(result.unparsable, 1)
+
+    def test_pinned_rounded_row_not_counted_in_approx(self):
+        """置顶篇不进样本，它的圆整值也不该算进 approx_rows——否则提示会多报一篇。"""
+        rows = [note("a", 100), note("p", "1.2万", pinned="1")]
+        result = summarize(rows, "acc1")
+        self.assertEqual(result.approx_rows, 0)
+        self.assertEqual(result.n_pinned, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

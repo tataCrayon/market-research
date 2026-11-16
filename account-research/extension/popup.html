@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<!--
+  小红书对标采集 —— 弹出面板：点图标就打开这里，采集也在这里执行。
+
+  ## 为什么采集跑在面板里而不是 background
+
+  `pageCapture.saveAsMHTML` 返回的是**文件-backed 句柄**而不是内存字节，
+  跨进程句柄在 service worker 里读不出来（实测 `NotReadableError`）。
+  面板是普通扩展页面（真渲染进程），有 `FileReader`，读得出来。
+
+  代价：**面板一关，采集就断**。所以界面上反复写着「别关这个面板」。
+
+  ## 为什么不写内联脚本
+
+  MV3 的 CSP 禁止内联脚本。这不只是限制——它同时保证了这个面板
+  **不可能被页面里的东西注入**。所有逻辑都在 popup.js 与 capture.js。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>小红书对标采集</title>
+  <style>
+    :root {
+      --ink: #2b2a28;
+      --muted: #7a766f;
+      --line: #e4e0d9;
+      --bg: #faf8f4;
+      --ok: #3f6b4f;
+      --err: #c05b3c;
+      --warn: #7a7440;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      width: 380px;
+      font: 13px/1.6 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    header { padding: 14px 16px 10px; border-bottom: 1px solid var(--line); }
+    h1 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: .01em; }
+    .sub { color: var(--muted); font-size: 11px; margin-top: 3px; word-break: break-all; }
+    section { padding: 12px 16px; border-bottom: 1px solid var(--line); }
+    section:last-of-type { border-bottom: 0; }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .stat { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+    .stat .n { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .stat .k { font-size: 11px; color: var(--muted); }
+    button {
+      width: 100%; padding: 10px 12px; font: inherit; font-weight: 600;
+      color: #fff; background: var(--ok); border: 0; border-radius: 6px; cursor: pointer;
+    }
+    button:disabled { background: #b6b2aa; cursor: default; }
+    button.secondary {
+      background: transparent; color: var(--ink);
+      border: 1px solid var(--line); font-weight: 400; margin-top: 8px;
+    }
+    .hint { font-size: 11px; color: var(--muted); margin-top: 8px; }
+    .progress { font-size: 12px; color: var(--warn); margin-top: 8px; }
+    .result { font-size: 12px; }
+    .result .line { padding: 2px 0; }
+    .result .bad { color: var(--err); }
+    .result .good { color: var(--ok); }
+    .result .note { color: var(--warn); }
+    details { margin-top: 6px; }
+    summary { cursor: pointer; color: var(--muted); font-size: 11px; }
+    pre {
+      margin: 6px 0 0; padding: 8px; border-radius: 4px;
+      font: 11px/1.5 ui-monospace, Consolas, monospace;
+      color: var(--muted); background: #fff; border: 1px solid var(--line);
+      white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow: auto;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>小红书对标采集</h1>
+    <div class="sub" id="sub">正在读取…</div>
+  </header>
+
+  <section>
+    <div class="stats">
+      <div class="stat"><div class="n" id="today">–</div><div class="k">今日已采</div></div>
+      <div class="stat"><div class="n" id="notes">–</div><div class="k">库里篇数</div></div>
+      <div class="stat"><div class="n" id="bodies">–</div><div class="k">有正文</div></div>
+    </div>
+  </section>
+
+  <section>
+    <button id="capture">采集当前窗口的笔记</button>
+    <div class="hint">采集前把每篇的图片栏滑到最后一张；采集期间别关这个面板。</div>
+    <div class="progress" id="progress" hidden></div>
+    <button id="register" class="secondary" hidden>本地宿主没注册 —— 看怎么装</button>
+  </section>
+
+  <section id="resultSection" hidden>
+    <div class="result" id="result"></div>
+  </section>
+
+  <script src="capture.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

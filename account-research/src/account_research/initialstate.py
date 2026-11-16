@@ -1,9 +1,12 @@
 """从存档 HTML 里取出 __INITIAL_STATE__ 并判定页面类型 / 归属。
 
-三条实测坑（case-001 复盘 §2，写解析器前必读）：
+四条实测坑（case-001 复盘 §2，写解析器前必读）：
 1. `__INITIAL_STATE__` 是 JS 字面量不是严格 JSON——`undefined` 值必须清洗成 `null`；
 2. 存档里混着采集者本人的会话数据（`user.userInfo` 是 viewer）——必须按目标 userId 归属校验；
-3. 文件名不是采集成功的证据，只有内容能（三份「详情页」实际都是主页）。
+3. 文件名不是采集成功的证据，只有内容能（三份「详情页」实际都是主页）；
+4. **`new Map([])` 会让整份 state 解析失败**（2026-11-03 实测 7 篇详情页里挂 5 篇）。
+   它藏在 `AiNoteDetailStore` 里，与正文无关，却足以把 `noteDetailMap` 一起带走——
+   于是那 5 篇只能退回 DOM 正则，丢掉 `shareCount` / 精确发布时间 / 视频时长。
 """
 
 from __future__ import annotations
@@ -75,9 +78,19 @@ def extract_literal(html: str) -> str:
 
 
 def clean_js_literals(literal: str) -> str:
-    """把字符串外的 JS 专有字面量换成 JSON 的 null。
+    """把字符串外的 JS 专有字面量换成 JSON 能解析的东西。
 
     逐字符走，不整串替换：正文里出现 `a:undefined` 这类文字时，整串替换会改坏内容。
+
+    两类替换（都来自真实存档实测）：
+    1. `undefined` / `NaN` → `null`（294 处）
+    2. `new Map([])` / `new Set()` → `{}` / `[]`
+
+    第 2 条是 2026-11-03 补的，**它决定了 detail 通道是能用 state 还是只能啃 DOM**：
+    实测 7 篇详情页里有 5 篇的 `__INITIAL_STATE__` 里带
+    `"AiNoteDetailStore":{"noteDetailMap":new Map([])}`，JSON 在 `new` 上直接报
+    `Expecting value`。修之前这 5 篇只能退回 DOM 正则，丢掉 shareCount / 精确发布时间 /
+    视频时长——而这三样 DOM 里都没有。
     """
     tokens = {"undefined", "NaN"}
     out: list[str] = []
@@ -102,6 +115,13 @@ def clean_js_literals(literal: str) -> str:
             out.append(ch)
             idx += 1
             continue
+        if literal.startswith("new", idx) and _is_token_boundary(literal, idx, idx + 3):
+            replaced = _empty_constructor_to_json(literal, idx)
+            if replaced is not None:
+                text, next_idx = replaced
+                out.append(text)
+                idx = next_idx
+                continue
         matched = next((t for t in tokens if literal.startswith(t, idx)), None)
         if matched and _is_token_boundary(literal, idx, idx + len(matched)):
             out.append("null")
@@ -110,6 +130,47 @@ def clean_js_literals(literal: str) -> str:
         out.append(ch)
         idx += 1
     return "".join(out)
+
+
+_EMPTY_CTOR_RE = re.compile(r"new\s+(Map|Set)\s*\(")
+
+
+def _empty_constructor_to_json(literal: str, start: int) -> tuple[str, int] | None:
+    """`new Map([])` → `{}`，`new Set()` → `[]`。不是空构造就当没看见（让它大声失败）。
+
+    **为什么不把非空 Map 也转换**：`new Map([["a",1]])` 里有真实数据，转成 `{}` 就是
+    静默丢数据。宁可让 JSON 解析报错、人来看一眼，也不要「解析成功但少了一半内容」。
+    """
+    match = _EMPTY_CTOR_RE.match(literal, start)
+    if not match:
+        return None
+    kind = match.group(1)
+    depth = 1
+    idx = match.end()
+    in_string = False
+    escaped = False
+    while idx < len(literal) and depth:
+        ch = literal[idx]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        idx += 1
+    if depth:
+        return None
+    inner = literal[match.end(): idx - 1].strip()
+    if inner not in ("", "[]", "[ ]"):
+        return None
+    return ("{}" if kind == "Map" else "[]"), idx
 
 
 def _is_token_boundary(text: str, start: int, end: int) -> bool:

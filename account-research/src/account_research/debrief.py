@@ -163,6 +163,9 @@ class Snapshot:
     stats: Any
     body_ready: set[str] = field(default_factory=set)
     images_ready: set[str] = field(default_factory=set)
+    # 有评论原文的篇目（`<note_id>.comments.txt`）。这是「读者说了什么」的证据层，
+    # 与正文（「他写了什么」）分开数：混在一起就会把人群画像误当成有据可依。
+    comments_ready: set[str] = field(default_factory=set)
     # 已有 id：模型直接看列表，不必自己去读 CSV（也避免重号）
     existing_ids: dict[str, list[str]] = field(default_factory=dict)
 
@@ -210,14 +213,82 @@ def collect_snapshot(
     images_ready = {
         str(row.get("note_id")) for row in merged if (text_dir / f"{row.get('note_id')}.images.txt").is_file()
     }
+    comments_ready = {
+        str(row.get("note_id")) for row in merged if (text_dir / f"{row.get('note_id')}.comments.txt").is_file()
+    }
     return Snapshot(
         account=account,
         notes=merged,
         stats=summarize(notes, account_id, k_values),
         body_ready=body_ready,
         images_ready=images_ready,
+        comments_ready=comments_ready,
         existing_ids=collect_existing_ids(data_dir),
     )
+
+
+def render_body_gate(snapshot: Snapshot) -> str:
+    """「深拆 3 篇」这条纪律的闸门：正文不够就必须说，而且说清哪层要留 ⬜。
+
+    为什么必须有这一段：SKILL.md 与验证清单都写着「深拆 3 篇（爆款 / 中位 / 近期）」
+    且「结构结论用的必须是同一层文本」，但**代码里一个字都没有**。
+    实测（2026-11-04）：知新那个号 30 篇样本里只有 1 篇有正文，`ar debrief` 首行照样
+    欢快地报「样本 30 篇」，一个警告都不打——而一轮真跑要烧 60–114 万 tokens。
+    这与 E14/E17 同源：规则写在文档里，执行靠人记得。
+
+    不出声的代价不是「结果差」，是「结果看起来一样好」：
+    模型会用标题 + 点赞硬写出一份结构拆解，读起来完全合理，而正文根本没读过。
+    """
+    notes = snapshot.notes
+    sample = [
+        row for row in notes
+        if not _is_pinned(row) and str(row.get("likes") or "").strip()
+    ]
+    ready = [row for row in sample if str(row.get("note_id")) in snapshot.body_ready]
+    readable = [row for row in sample if str(row.get("note_id")) in snapshot.images_ready]
+    total = len(sample)
+    if total == 0:
+        return "⚠️ 样本为 0：没有任何一篇能进统计，拆解无从谈起。"
+
+    body_n = len(ready)
+    images_n = len(readable)
+    # 🔧 「深拆 3 篇」里那 3 是 SKILL.md 定的下限，不是随手挑的数。
+    required = 3
+    # 正文层与图上文字层是**两批不同的篇目**：一篇也可能两层都有。
+    # 判断「读得到几篇」必须按篇取并集，不能把两个数相加——那会把同一篇数两次。
+    readable_ids = (
+        {str(row.get("note_id")) for row in ready}
+        | {str(row.get("note_id")) for row in readable}
+    )
+    any_n = len(readable_ids)
+    if any_n >= required:
+        return (f"- 可读正文 {any_n}/{total} 篇（其中正文层 {body_n} 篇、图上文字层 {images_n} 篇）："
+                f"满足「深拆 3 篇」的下限，结构结论可以基于实读文本。")
+
+    # 不足 3 篇——分档说清后果，别用一个笼统的「注意」了事
+    titles = "、".join(
+        f"`{note_id[:8]}`（{next((r.get('title') or '无标题' for r in ready + readable if str(r.get('note_id')) == note_id), '')}）"
+        for note_id in sorted(readable_ids)
+    ) or "无"
+    if body_n == 0 and images_n == 0:
+        head = (f"⛔ **正文一篇都读不到**（0/{total}，图上文字也是 0/{total}）："
+                f"结构层（开头钩子 / 中段节奏 / 结尾引导 / 标题句式）**必须整层留 ⬜**，"
+                f"不许用标题 + 点赞反推结构——那不是拆解，是编。")
+    elif any_n < required:
+        head = (f"⚠️ **能读到的文本只有 {any_n} 篇**（正文层 {body_n} / 图上文字层 {images_n}，"
+                f"样本 {total}）：不足 SKILL.md 要求的「深拆 3 篇」。"
+                f"**结构层结论必须在 sample_basis 里写明样本量，并标注仅这几篇成立**；"
+                f"不许把 {any_n} 篇的观察写成「这个号的通用结构」。")
+    else:
+        head = (f"⚠️ **正文层只读到 {body_n}/{total} 篇**（图上文字层 {images_n}/{total} 篇）："
+                f"结构层只能基于这几篇，样本量必须写进 sample_basis。")
+    lines = [head, f"- 可读文本的具体篇目：{titles}"]
+    if any_n < required:
+        lines.append(
+            "- 其余篇只能支撑**选题层**（标题 + 时间 + 点赞），"
+            "**不要**对它们写开头钩子 / 段落数 / 结尾引导这类需要正文的判断。"
+        )
+    return "\n".join(lines)
 
 
 def render_account_block(snapshot: Snapshot) -> str:
@@ -260,7 +331,7 @@ def render_stats_block(stats: Any) -> str:
     )
     coverage = " | ".join(f"{label} {value}" for label, value in stats.coverage.items()) or "⬜"
     forms = " | ".join(f"{form} {data['n']} 篇/篇均 {data['mean']}" for form, data in stats.forms.items()) or "⬜"
-    return "\n".join((
+    lines = [
         f"- 样本 {stats.n_sample} 篇（置顶 {stats.n_pinned} 篇单列，不进样本；因缺来源被排除 {stats.excluded} 行）",
         f"- 点赞：篇均 {likes.mean} | 中位 {likes.median} | 最高 {likes.maximum} | 最低 {likes.minimum}",
         f"- 爆文率（相对账号自身，K 值无共识）：{burst or '⬜'}",
@@ -268,7 +339,24 @@ def render_stats_block(stats: Any) -> str:
         f"- 字段覆盖：{coverage}",
         f"- 时间窗：{stats.window[0]} → {stats.window[1]}",
         "- 互动率**不可算**：曝光量仅作者后台可见（fields 表已登记 ⬜），不得编分母",
-    ))
+    ]
+    # 圆整值必须在**模型读到数字的地方**就说清，而不是靠它自己去看 ⬜ 纪律那一条。
+    # `1.2万` 会以 `12000` 的形式出现在上面的篇均/中位里，模型无从知道那是个圆整值。
+    approx = int(getattr(stats, "approx_rows", 0) or 0)
+    if approx:
+        # 只报个数不够用：模型知道「有 1 篇是圆整值」却不知道是哪篇，只能猜。
+        # 名单直接给它——这才是「代码算好、模型只引用」该有的形态。
+        names = getattr(stats, "approx_notes", ()) or ()
+        listed = "、".join(names[:8]) + ("…" if len(names) > 8 else "")
+        lines.append(
+            f"- **⚠️ {approx} 篇的点赞是圆整值**（平台过万后渲染成「1.2万」这类 3 位有效数字）："
+            f"{listed}。它们已计入上面的篇均/中位，但**逐篇引用这些篇的点赞时必须写 `≈12,000`，"
+            f"不得当 12,000 用**。样本表里这些数看起来是普通整数，是因为代码做了换算——换算不等于精确。"
+        )
+    unparsable = int(getattr(stats, "unparsable", 0) or 0)
+    if unparsable:
+        lines.append(f"- **⚠️ 有 {unparsable} 篇的点赞无法解析，已排除出样本**：引用任何 a/b 时不得把它们算进分母。")
+    return "\n".join(lines)
 
 
 def render_coverage_block(snapshot: Snapshot) -> str:
@@ -283,10 +371,14 @@ def render_coverage_block(snapshot: Snapshot) -> str:
         f"- 样本 {sample} 篇（置顶 {counts['n_pinned']} 篇单列，不进样本）",
         f"- 有正文 {counts['body']}/{sample} → 缺 {sample - counts['body']}/{sample}",
         f"- 有图上文字 {counts['images']}/{sample} → 缺 {sample - counts['images']}/{sample}",
-        f"- 有收藏 {counts['collects']}/{sample} | 有评论 {counts['comments']}/{sample}"
+        f"- 有收藏 {counts['collects']}/{sample} | 有评论数 {counts['comments']}/{sample}"
         f" | 有分享 {counts['shares']}/{sample}",
+        f"- 有评论**原文** {counts['comments_text']}/{sample}"
+        f"（`account/notes-text/<note_id>.comments.txt`，是**首屏**几条，不是全部）",
         f"- 有发布日期 {counts['dated']}/{sample}",
         "- **引用任何 `a/b` 之前先在这里找对应数**；找不到的数不许写，写成 ⬜ 并计入 sample_basis",
+        "- 人群画像只能用「有评论原文」的那几篇；**「有评论数」不等于读到过评论**——"
+        "只看到数字就推断人群，是把缺证据写成了证据。",
     ))
 
 
@@ -362,6 +454,10 @@ def build_task(snapshot: Snapshot, repo_root: Path) -> str:
         "「正文 ✅」= 有 `account/notes-text/<note_id>.txt`；「图上 ✅」= 有 `<note_id>.images.txt`。",
         images_note,
         "",
+        "### 3.1 正文可读性闸门（这条决定你能下哪些结论）",
+        "",
+        render_body_gate(snapshot),
+        "",
         "## 4 统计口径（代码已算出，直接引用，不要重算）",
         "",
         render_stats_block(snapshot.stats),
@@ -382,10 +478,12 @@ def build_task(snapshot: Snapshot, repo_root: Path) -> str:
         "",
         "- [ ] 每条 finding 都有 grade，且 ③ 级行的 used_in_verdict 为 0",
         "- [ ] 每条 playbook 都有 failure_condition（否则等于「建议全抄」）",
-        "- [ ] 每条 hypothesis 都有 experiment 与 due_on，status 四选一",
+        "- [ ] 每条 hypothesis 都有 experiment 与 due_on，status 取前四个之一"
+        "（`超期未验` 是结案状态，只能由 `ar close` 写入，不要自己填）",
         "- [ ] verdicts 每行都有 next_step / cheapest_test / abandon_signal",
         "- [ ] 全文没有 URL、没有图片路径、没有 ⬜ 被填成数字",
         "- [ ] sample_basis 写清了样本量与缺口（含图上文字缺多少）",
+        "- [ ] **§3.1 若标了 ⛔ / ⚠️，结构层结论必须按那里的要求降级**（不足 3 篇不许写成通用结构；0 篇整层留 ⬜）",
         "",
     ))
 
@@ -545,9 +643,21 @@ def payload_summary(payload: dict[str, list[dict[str, Any]]]) -> str:
 
 
 def coverage_counts(snapshot: Snapshot) -> dict[str, int]:
-    """样本级可核算的覆盖计数。所有 `a/b` 断言的分子必须落在这个集合里。"""
+    """样本级可核算的覆盖计数。所有 `a/b` 断言的分子必须落在这个集合里。
+
+    **样本必须和 §4 统计块用同一个定义**（2026-11-04 实测修正）：
+    早先这里只排除置顶，而 `stats.summarize` 还多排除一类——点赞为空、无法进统计的行。
+    实测知新那个号：§4 报「样本 30 篇」，§5 报「样本 31 篇」，同一个任务里两个分母。
+    模型引用 `a/b` 时被迫二选一，闸门 `audit_ratios` 又按 §5 判——**等于两个口径互相打架**。
+
+    现在统一到「能进统计的样本」：置顶与无点赞行都不算。
+    置顶仍单列（它是账号门面，不是常规产能）；无点赞行同理不进任何分母。
+    """
     notes = snapshot.notes
-    sample = [row for row in notes if not _is_pinned(row)]
+    sample = [
+        row for row in notes
+        if not _is_pinned(row) and str(row.get("likes") or "").strip()
+    ]
 
     def filled(row: dict[str, Any], column: str) -> bool:
         value = str(row.get(column) or "").strip()
@@ -556,11 +666,14 @@ def coverage_counts(snapshot: Snapshot) -> dict[str, int]:
     return {
         "n_total": len(notes),
         "n_sample": len(sample),
-        "n_pinned": len(notes) - len(sample),
+        "n_pinned": sum(1 for row in notes if _is_pinned(row)),
         "body": sum(1 for row in sample if str(row.get("note_id")) in snapshot.body_ready),
         "images": sum(1 for row in sample if str(row.get("note_id")) in snapshot.images_ready),
         "collects": sum(1 for row in sample if filled(row, "collects")),
         "comments": sum(1 for row in sample if filled(row, "comments")),
+        # 「有评论**原文**」与「有评论**数量**」是两件事，分开数。
+        # 早先只数了数量，于是「人群画像 ⬜」和「评论 5/30 可见」同时出现在一份报告里。
+        "comments_text": sum(1 for row in sample if str(row.get("note_id")) in snapshot.comments_ready),
         "shares": sum(1 for row in sample if filled(row, "shares")),
         "dated": sum(1 for row in sample if filled(row, "published_at")),
     }
@@ -657,7 +770,49 @@ def _ratio_hint(counts: dict[str, int], total: int) -> str:
 DATE_DEFAULTS = {
     "verdicts": ("decided_on",),
     "findings": ("sampled_on",),
+    # 假设表 2026-11-12 起也有日期：`recorded_on` 是「这一行是什么时候记下的」。
+    # 它进键之后，结案才能追加新行（见 `close.py`）。模型不知道今天几号，
+    # 所以和 `decided_on` 一样由代码无条件写——否则 V6 会因缺 recorded_on 拒收闭案行。
+    "hypotheses": ("recorded_on",),
 }
+
+# 判决的复核间隔：`due_on` 相对 `decided_on` 往后推多少天。
+# 覆盖 `decided_on` 时必须按**模型原本的意图间隔**重锚 `due_on`，否则间隔会被压成 0。
+ANCHORED_SPANS = {"verdicts": ("due_on",)}
+
+
+def _shift(date_text: str, days: int) -> str:
+    from datetime import date, timedelta
+
+    try:
+        return (date.fromisoformat(date_text) + timedelta(days=days)).isoformat()
+    except (TypeError, ValueError):
+        return date_text
+
+
+def _reanchor_due(row: dict[str, Any], original_decided: str, on: str) -> str:
+    """把 `due_on` 按模型原本的间隔重锚到新的 `decided_on` 上。
+
+    **为什么必须做这件事**（2026-11-06 实测）：E21 那次修复把 `decided_on`
+    无条件覆盖成真实拆解日，模型原文是 10-28（数据窗口末日）→ 11-04，
+    间隔 7 天；覆盖后变成 11-04 → 11-04，**间隔 0 天**。
+    后果不是报错，是 `D1` 在判决落库的当天就开始喊「到期未复核」——
+    一条永远不可能按时执行的纪律，喊两天就变成噪音（E12）。
+
+    覆盖起点却不覆盖终点，等于把「他给了 7 天」改写成「他要求当天复核」。
+    间隔才是模型真正表达的意思，所以按间隔重锚，而不是照抄原来的 `due_on`。
+    返回空串表示不需要重锚（模型没写 `due_on` 就交白卷，不许我们替它编）。
+    """
+    due = str(row.get("due_on") or "").strip()
+    if not due or not original_decided:
+        return due
+    from datetime import date
+
+    try:
+        span = (date.fromisoformat(due) - date.fromisoformat(original_decided)).days
+    except (TypeError, ValueError):
+        return due
+    return _shift(on, span)
 
 
 def normalize_rows(
@@ -665,19 +820,54 @@ def normalize_rows(
 ) -> dict[str, list[dict[str, Any]]]:
     """补两样模型不该操心、又决定校验成败的东西：归属账号与日期。
 
-    - `account_id`：模型可能忘记填。空着会被 V7 判成「归属断裂」，
-      而实际原因是拼装方没收尾——这种失败不该由模型承担。
-    - 日期：`decided_on` / `sampled_on` 是本次拆解的发生日，本就是确定的。
-    除这两项外**不补任何字段**：其余留空是证据缺口，补了就是编数据。
+    **日期是确定性的，代码说了算**（2026-11-04 修正）：`decided_on` / `sampled_on`
+    就是「本次拆解发生在哪天」，代码知道，模型不知道。
+
+    早先只在字段为空时才补，实测立刻出事：知新那轮模型自己填了 `2026-10-28`
+    ——那是**数据窗口的末日**，不是拆解日。于是判决的 `decided_on` 比真实早 7 天，
+    直接污染「到期该复核」的告警（D1/D2 按 decided_on + due_on 算天数）。
+    这种错读起来完全合理，而且不会让任何校验报错。
+
+    所以改成**无条件覆盖**，并把模型的原始值打出来——覆盖不静默，否则就是另一种编数据。
+
+    **连带义务**（2026-11-06 补）：`due_on` 是相对 `decided_on` 的锚点。
+    只改起点不改终点，间隔会被压成 0，D1 在落库当天就开始喊。
+    所以按模型原本的间隔重锚 `due_on`（见 `_reanchor_due`）。
+
+    `account_id` 仍只在空时补：模型偶尔会填错账号，但那种情况该由 V7 报出来让人看，
+    不该被静默改写。
     """
     for table, rows in payload.items():
         for row in rows:
             if "account_id" in row and not str(row.get("account_id") or "").strip():
                 row["account_id"] = account_id
             for column in DATE_DEFAULTS.get(table, ()):
-                if column in row and not str(row.get(column) or "").strip():
-                    row[column] = on
+                if column not in row:
+                    continue
+                written = str(row.get(column) or "").strip()
+                if written and written != on:
+                    row[f"__{column}_was"] = written    # 供调用方打印后被摘掉
+                for anchored in ANCHORED_SPANS.get(table, ()):
+                    shifted = _reanchor_due(row, written, on)
+                    if shifted and shifted != str(row.get(anchored) or "").strip():
+                        row[f"__{anchored}_was"] = str(row.get(anchored) or "").strip()
+                        row[anchored] = shifted
+                row[column] = on
     return payload
+
+
+def collect_date_overrides(payload: dict[str, list[dict[str, Any]]]) -> list[tuple[str, str, str]]:
+    """把 `normalize_rows` 覆盖掉的模型原值取出来（表名, 列名, 原值），并从行里摘掉。
+
+    打印它是纪律的一部分：**静默纠正也是编数据**——只不过编的是「模型没写错」这个假象。
+    """
+    found: list[tuple[str, str, str]] = []
+    for table, rows in payload.items():
+        for row in rows:
+            for key in [k for k in row if k.startswith("__") and k.endswith("_was")]:
+                column = key[2:-4]
+                found.append((table, column, str(row.pop(key) or "")))
+    return found
 
 
 def drop_empty_rows(payload: dict[str, list[dict[str, Any]]]) -> tuple[dict[str, list[dict[str, Any]]], int]:

@@ -205,5 +205,86 @@ class TestIngestRunsImageChannel(unittest.TestCase):
         self.assertFalse((self.text_dir / f"{NOTE_ID}.images.txt").exists())
 
 
+class TestDuplicateArchives(unittest.TestCase):
+    """同一篇笔记有好几份存档时，必须说清哪份最全——否则 OCR 会让缺图的覆盖完整的。
+
+    2026-11-13 实测：先存了一份只带 3 张图的（懒加载没滚完），
+    滑到底重存了一份 16 张的。两份都在 `processed/` 里，
+    `ar images` 对同一篇打印两行、**没有一行说哪份该用**；
+    而 `--ocr` 会依次处理，后跑的旧存档把 `images.txt` 覆盖成 3 张的结果。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.text_dir = self.root / "notes-text"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _archive(self, name: str, keep: int, total: int) -> Path:
+        """造一份 swiper 存档：`total` 个 slide，只有前 `keep` 张有本地文件。"""
+        files_dir = self.root / f"{name}_files"
+        files_dir.mkdir(exist_ok=True)
+        slides = []
+        for index in range(total):
+            file_name = f"img{index}!webp_3"
+            if index < keep:
+                (files_dir / file_name).write_bytes(b"x")
+                src = f"./{name}_files/{file_name}"
+            else:
+                src = f"https://sns-webpic-qc.xhscdn.com/20261113/abc/spectrum/{file_name}"
+            slides.append(
+                f'<div class="swiper-slide" data-swiper-slide-index="{index}">'
+                f'<img src="{src}"></div>'
+            )
+        path = self.root / f"{name}.html"
+        path.write_text(
+            "<!DOCTYPE html><html><head>"
+            f'<meta property="og:url" content="https://www.xiaohongshu.com/explore/{NOTE_ID}" />'
+            "</head><body>"
+            # 平台自己的「第几张/共几张」计数器——没有它 `declared` 是 None，
+            # 而「已绑全 / 不全」这套判断完全建立在它之上。测试里必须给。
+            f'<div class="fraction">1/{total}</div>'
+            '<div id="noteContainer"><div class="note-slider">'
+            f'<div class="swiper-wrapper">{"".join(slides)}</div></div>'
+            '<div class="note-scroller"></div></div></body></html>',
+            encoding="utf-8",
+        )
+        return path
+
+    def _run(self, argv: list[str]) -> str:
+        import contextlib
+        import io
+
+        buffer = io.StringIO()
+        original = cli.load_engine
+        cli.load_engine = FakeEngine
+        try:
+            with contextlib.redirect_stdout(buffer):
+                main(argv)
+        finally:
+            cli.load_engine = original
+        return buffer.getvalue()
+
+    def test_marks_which_archive_is_complete(self):
+        self._archive("旧存档", keep=3, total=16)
+        self._archive("新存档", keep=16, total=16)
+        output = self._run(["images", "--root", str(self.root)])
+        self.assertIn("这份最全", output)
+        self.assertIn("旧存档（少 13 张图）", output)
+
+    def test_ocr_only_runs_on_the_best_archive(self):
+        """两行都跑 OCR 的话，后跑的那份会覆盖 `images.txt`——缺图的把完整的盖掉。"""
+        self._archive("新存档", keep=16, total=16)
+        self._archive("旧存档", keep=3, total=16)
+        output = self._run(["images", "--root", str(self.root), "--ocr",
+                            "--text-dir", str(self.text_dir)])
+        self.assertIn("跳过 OCR", output)
+        text = (self.text_dir / f"{NOTE_ID}.images.txt").read_text(encoding="utf-8")
+        self.assertIn("已绑全", text, "产出必须是完整那份的结果")
+        self.assertIn("## 图 16", text, "16 张都要有段落")
+
+
 if __name__ == "__main__":
     unittest.main()

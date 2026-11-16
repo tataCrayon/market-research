@@ -112,7 +112,14 @@ def check_playbook(rows: list[dict[str, Any]]) -> list[Issue]:
 
 
 def check_hypotheses(rows: list[dict[str, Any]]) -> list[Issue]:
-    """假设表自身的完整性：状态封闭 + 实验与到期日必填。"""
+    """假设表自身的完整性：状态封闭 + 实验与到期日必填 + 结案留痕。
+
+    V6 只查「状态/实验/到期日」这三样。2026-11-12 补两条：
+    - 结案状态（`已证伪/已证实/超期未验`）必须有 `recorded_on`，
+      否则「哪天结的案」无从查起，`latest_hypotheses` 折叠时会把它的优先级判成最旧。
+    - `超期未验` 必须有 `close_note`（为什么没做），这条与 `close.py` 的
+      `NOTE_REQUIRED` 一致——校验器是最后一道门，不能只靠命令层自觉。
+    """
     issues: list[Issue] = []
     for row in rows:
         ref = str(row.get("hypothesis_id") or "?")
@@ -122,6 +129,18 @@ def check_hypotheses(rows: list[dict[str, Any]]) -> list[Issue]:
         for col in ("experiment", "due_on"):
             if not str(row.get(col) or "").strip():
                 issues.append(Issue("V6", "ERROR", f"{ref}: 缺 {col}（不可验证的假设不许留在表里）"))
+        if status in schema.HYPOTHESIS_CLOSED:
+            if not str(row.get("recorded_on") or "").strip():
+                issues.append(Issue(
+                    "V6", "ERROR",
+                    f"{ref}: 结案状态「{status}」缺 recorded_on（不记日期的话，"
+                    f"折叠最新状态时这条会被判成最旧的，结案等于白结）",
+                ))
+            if status == "超期未验" and not str(row.get("close_note") or "").strip():
+                issues.append(Issue(
+                    "V6", "ERROR",
+                    f"{ref}: 「超期未验」缺 close_note（为什么没做实验？）",
+                ))
     return issues
 
 

@@ -177,3 +177,31 @@ def latest_per_note(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         accumulator["note_id"] = note_id
         merged.append(accumulator)
     return merged
+
+
+def latest_hypotheses(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """每条假设只留**最新一次记录**：按 `recorded_on` 升序折叠，后到的覆盖。
+
+    为什么需要：假设表原来一条假设终生一行，于是到期后**无法结案**
+    （键是 `hypothesis_id`，再写一行会被 `preview_append` 静默跳过）。2026-11-12 起
+    `recorded_on` 进键，结案 = 追加一行新状态——历史状态留在表里（那是证据），
+    但**判断「现在是什么状态」必须只看最新一行**。
+
+    不折叠的后果很具体：`H-KZK-01` 会同时存在「未验证」与「超期未验」两行，
+    D2 告警会拿旧行去报逾期——**结案了却还在响**，比不结案更让人不信任告警。
+
+    列序稳定：同一时刻（同一天多次记录）后写的那行赢，靠 CSV 行序保证。
+    """
+    grouped: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for position, row in enumerate(rows):
+        key = str(row.get("hypothesis_id") or "").strip()
+        if key:
+            grouped.setdefault(key, []).append((position, row))
+    latest: list[dict[str, Any]] = []
+    for key, group in grouped.items():
+        # 先按 recorded_on，再按原始行序（同日多次记录取最后写入的那行）
+        _, winner = max(group, key=lambda pair: (str(pair[1].get("recorded_on") or ""), pair[0]))
+        merged = dict(winner)
+        merged["hypothesis_id"] = key
+        latest.append(merged)
+    return latest

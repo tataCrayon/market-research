@@ -11,6 +11,8 @@ from __future__ import annotations
 import html
 from typing import Any
 
+from .counts import parse_count
+
 STYLE = """
 :root{--paper:#faf8f3;--ink:#241f1a;--muted:#7a6f63;--green:#2f6f52;--clay:#b8613c;--line:#e2dbcf}
 *{box-sizing:border-box}
@@ -41,7 +43,9 @@ def _row_html(
 ) -> str:
     note_id = str(row.get("note_id") or "")
     title = str(row.get("title") or "(无标题)")
-    likes = str(row.get("likes") or "?")
+    # 圆整值（`1.2万`）在清单里必须带 ≈：这一列是用来比大小的，但不能替平台编精度。
+    parsed = parse_count(row.get("likes"))
+    likes = parsed.text() if parsed else "?"
     if not token:
         state, cls = "无 token", "tag warn"
     elif has_text:

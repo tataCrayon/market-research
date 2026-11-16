@@ -35,6 +35,9 @@ DOM_SLIDER_START = "note-slider"
 DOM_SLIDER_END = "note-scroller"
 SLIDE_INDEX_RE = re.compile(r'data-swiper-slide-index="(\d+)"')
 SLIDE_IMG_RE = re.compile(r'src="(\./[^"]*_files/[^"]+)"')
+# 任何 `src`（含远程 URL）。懒加载的 slide 只有远程地址——那时本地没有文件，
+# 但**远程地址本身仍是有效证据**（能证明这一张存在、内容是哪一张）。
+URL_REF_RE = re.compile(r'src="([^"]+)"')
 # 平台自己渲染的「第几张/共几张」计数器：`<div class="fraction">1/26</div>`
 # 这是唯一一个**由平台给出**的总数，用来校验我们到底有没有把图绑全。
 FRACTION_RE = re.compile(r'class="[^"]*\bfraction\b[^"]*"[^>]*>\s*\d+\s*/\s*(\d+)\s*<')
@@ -77,14 +80,19 @@ class NoteImages:
 
     @property
     def incomplete(self) -> bool:
-        """绑到的张数少于平台声明的张数。
+        """**真正落地**的图片少于平台声明的张数。
 
         **为什么需要它**：`source` 说「绑上了」不等于「绑全了」。平台自己在
         `<div class="fraction">1/26</div>` 里给了总张数，那是唯一可信的外部口径。
-        少了就说明我们漏了图（要修解析），不少就说明原始数据本身就只有这些
-        （要记 ⬜，别去改代码）。
+
+        ⚠️ 判据是 `local` 而不是 `total`（2026-11-13 修）。
+        `total` 只数「枚举到几个条目」——懒加载的 slide 会被枚举到（有远程 URL），
+        但本地没有文件，OCR 拿不到字。用 `total` 比，`6aed6c2b` 那篇
+        16 个条目 / 16 张声明 会报「已绑全」，而实际只有 3 张有文件。
+
+        **这个属性存在的意义就是别让「看起来齐了」骗过人。**
         """
-        return self.declared is not None and self.total < self.declared
+        return self.declared is not None and self.local < self.declared
 
 
 def images_dir(archive: Path) -> Path:
@@ -285,24 +293,38 @@ def dom_slides(html: str, files: dict[str, Path]) -> list[NoteImage]:
     实测（Kimi 那篇）：swiper 会把首尾 slide 各复制一份，直接扫 `<img>` 会多出重复；
     而 slide-index 是平台自己给的序号（0..N-1），去重后顺序也天然正确。
     头像、推荐流封面都不在 slider 里，因此不会被误算——实测整段扫描会多出十几张别人的封面。
+
+    ⚠️ **必须把每个 slide 的搜索范围限制在它自己的标签内**（2026-11-13 修的静默错数据）。
+    原来用的是 `SLIDE_IMG_RE.search(region, match.end())`——从这里**一路向后搜到文末**。
+    于是：当某个 slide 只有远程 `src`（懒加载没被存进 `_files/`）时，
+    搜索会**越过边界，偷到后面某张图的本地路径**，把它算成自己的。
+
+    真实后果（`6aed6c2b`，16 图笔记）：第 2–14 张只有远程 URL，全都偷到了第 15 张的本地文件，
+    于是 `total=16 / local=16 / incomplete=False`——**看起来"已绑全"，
+    实际上 14 个条目指向同一张图**，OCR 会把同一张图的字算 14 遍。
+    这比「报缺图」危险得多：缺图会显示 ⬜，而这个不会。
     """
     region = _slider_region(html)
     if not region:
         return []
-    indexed: dict[int, str] = {}
-    for match in SLIDE_INDEX_RE.finditer(region):
-        index = int(match.group(1))
-        if index in indexed:
+    marks = [(match.start(), int(match.group(1))) for match in SLIDE_INDEX_RE.finditer(region)]
+    indexed: dict[int, NoteImage] = {}
+    for order, (start, index) in enumerate(marks):
+        if index in indexed:  # swiper 的克隆 slide：序号与真身相同，先到的那个是真的
             continue
-        img = SLIDE_IMG_RE.search(region, match.end())
-        if not img:
-            continue
-        name = url_basename(img.group(1))
-        if name in files:
-            indexed[index] = name
+        own_end = marks[order + 1][0] if order + 1 < len(marks) else len(region)
+        own = region[start:own_end]
+        img = SLIDE_IMG_RE.search(own)
+        raw = URL_REF_RE.search(own)
+        url = (raw.group(1) if raw else "") if not img else img.group(1)
+        name = url_basename(url) if url else ""
+        # 本地没有这个文件就如实记为未绑定——**不许借用邻居的**。
+        indexed[index] = NoteImage(
+            index=0, url=url, file_id=name, local=files.get(name) if name else None
+        )
     return [
-        NoteImage(index=order, url="", file_id="", local=files[name])
-        for order, (_, name) in enumerate(sorted(indexed.items()), start=1)
+        NoteImage(index=order, url=image.url, file_id=image.file_id, local=image.local)
+        for order, (_, image) in enumerate(sorted(indexed.items()), start=1)
     ]
 
 

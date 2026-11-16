@@ -339,6 +339,86 @@ class DeclaredTotalTest(unittest.TestCase):
         self.assertIn("不全", text)
 
 
+class LazySlideBindingTest(unittest.TestCase):
+    """懒加载的 slide 只有远程 `src` 时，**不许借用邻居的本地文件**。
+
+    2026-11-13 的真实事故（笔记 `6aed6c2b`，16 图）：
+    第 2–14 张是懒加载的，只有远程 URL、本地没有文件；
+    而 `dom_slides` 当时用 `search(region, match.end())` **一路搜到文末**，
+    于是这 13 个 slide 全都偷到了第 15 张的本地路径。
+
+    结果是 `total=16 / local=16 / incomplete=False`——**看起来"已绑全"，
+    实际 14 个条目指向同一张图**，OCR 把同一张图的字算 14 遍。
+
+    这比「报缺图」危险得多：缺图会显示 ⬜，而假绑定不会报任何东西。
+    """
+
+    def _archive(self, root: Path, slide_names: list[str], lazy: set[int]) -> Path:
+        """造一份 swiper：`lazy` 里的序号只有远程 URL，其余有本地 `_files/` 路径。"""
+        files_dir = root / "测试 - 小红书_files"
+        files_dir.mkdir(exist_ok=True)
+        slides = []
+        for index, name in enumerate(slide_names):
+            if index in lazy:
+                src = f"https://sns-webpic-qc.xhscdn.com/20261113/abc/spectrum/{name}"
+            else:
+                (files_dir / name).write_bytes(b"x")
+                src = f"./测试 - 小红书_files/{name}"
+            slides.append(
+                f'<div class="swiper-slide" data-swiper-slide-index="{index}">'
+                f'<img src="{src}"></div>'
+            )
+        archive = root / "测试 - 小红书.html"
+        archive.write_text(
+            "<!DOCTYPE html><html><head>"
+            f'<meta property="og:url" content="https://www.xiaohongshu.com/explore/{NOTE_ID}" />'
+            "</head><body>"
+            '<div id="noteContainer"><div class="note-slider">'
+            f'<div class="swiper-wrapper">{"".join(slides)}</div></div>'
+            '<div class="note-scroller"></div>'
+            "</div></body></html>",
+            encoding="utf-8",
+        )
+        return archive
+
+    def test_lazy_slides_do_not_borrow_a_neighbour_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            names = [f"img{i}!webp_3" for i in range(8)]
+            archive = self._archive(root, names, lazy={1, 2, 3, 4, 5, 6})
+            note = img.collect(archive, {}, archive.read_text(encoding="utf-8"), search_root=root)
+
+            self.assertEqual(note.total, 8, "张数应等于 slide 序号数，不是能绑上几个")
+            self.assertEqual(note.local, 2, "只有 img0 与 img7 有本地文件")
+            self.assertEqual(len({i.local for i in note.images if i.local}), 2,
+                             "两个已绑定的条目必须指向**不同**的文件")
+            self.assertEqual(note.missing(), [2, 3, 4, 5, 6, 7])
+
+    def test_lazy_slides_keep_their_remote_url_as_evidence(self):
+        """远程 URL 不是空的：它证明这一张存在、是哪一张，只是没落到本地。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            names = [f"img{i}!webp_3" for i in range(3)]
+            archive = self._archive(root, names, lazy={1})
+            note = img.collect(archive, {}, archive.read_text(encoding="utf-8"), search_root=root)
+            lazy_image = note.images[1]
+            self.assertIsNone(lazy_image.local)
+            self.assertIn("sns-webpic", lazy_image.url)
+            self.assertEqual(lazy_image.file_id, "img1!webp_3")
+
+    def test_reports_incomplete_when_platform_declares_more_than_bound(self):
+        """这是这次事故真正的警报器：张数够了但**没绑上**，必须报不全。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            names = [f"img{i}!webp_3" for i in range(16)]
+            archive = self._archive(root, names, lazy=set(range(1, 15)))
+            note = img.collect(archive, {}, archive.read_text(encoding="utf-8"), search_root=root)
+            self.assertEqual(note.total, 16)
+            self.assertEqual(note.local, 2)
+            self.assertEqual(len({i.local for i in note.images if i.local}), 2,
+                             "假绑定的典型症状就是这里塌成 1 或 2")
+
+
 class BodyThinTest(unittest.TestCase):
     def test_body_chars_counts_only_desc_paragraphs(self):
         html = detail_html(body="短")

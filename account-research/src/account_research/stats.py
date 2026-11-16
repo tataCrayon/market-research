@@ -2,6 +2,11 @@
 
 爆文率是个口径坑（字典 §4：「爆文」至少三种定义，同一样本数字不同）。
 所以这里强制把 K 值和定义随结果一起打印，禁止只给一个百分比。
+
+**圆整值的处理（2026-11-03）**：平台过万之后把计数渲染成 `1.2万`。早先 `_int_or_none`
+对它返回 None，于是那一行被**静默丢出样本**——`n_total` 少一篇、`excluded` 还是 0、
+没有一个字提示。现在走 `counts.to_count`：换算成整数计入统计，同时用 `approx_rows`
+把「这个数不是精确值」报出来。样本量不因计数写法而变，这是底线。
 """
 
 from __future__ import annotations
@@ -10,6 +15,7 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Any
 
+from .counts import is_approx, to_count
 from .store import latest_per_note
 
 
@@ -35,13 +41,31 @@ class SampleStats:
     coverage: dict[str, str] = field(default_factory=dict)
     window: tuple[str, str] = ("", "")
     excluded: int = 0
+    # 样本里有多少篇的点赞是圆整值（`1.2万`）。这些数字参与排序与分档没问题，
+    # 但**报告里逐篇引用时必须标 ≈**，不能把 11,500 写成 12,000。
+    approx_rows: int = 0
+    # 具体是哪几篇。只报个数字不够用：模型知道「有 1 篇是圆整值」却不知道是哪篇，
+    # 只能靠猜——而猜错就是把精确值写成近似值、或反过来。名单要直接给它。
+    approx_notes: tuple[str, ...] = ()
+    # 计数写法坏到连 `counts.parse_count` 都解析不出来的行（既不是数字也不是「万」）。
+    # 这类才真的该被排除，但必须**报出来**，不许静默。
+    unparsable: int = 0
 
 
-def _int_or_none(value: Any) -> int | None:
-    try:
-        return int(str(value).replace(",", "")) if str(value).strip() else None
-    except (TypeError, ValueError):
-        return None
+def _like_values(sample: list[dict[str, Any]]) -> tuple[list[int], tuple[str, ...], int]:
+    """→ (点赞整数列, 圆整值的 note_id 列表, 解析失败篇数)。"""
+    values: list[int] = []
+    approx: list[str] = []
+    unparsable = 0
+    for row in sample:
+        parsed = to_count(row.get("likes"))
+        if parsed is None:
+            unparsable += 1
+            continue
+        values.append(parsed)
+        if is_approx(row.get("likes")):
+            approx.append(str(row.get("note_id") or "?"))
+    return values, tuple(approx), unparsable
 
 
 def _like_stats(values: list[int]) -> LikeStats:
@@ -68,10 +92,12 @@ def summarize(notes: list[dict[str, Any]], account_id: str = "", k_values: tuple
     """
     scoped = [row for row in notes if not account_id or str(row.get("account_id")) == account_id]
     valid = [row for row in scoped if str(row.get("collected_on") or "").strip()]
-    usable = [row for row in latest_per_note(valid) if _int_or_none(row.get("likes")) is not None]
+    # 「能不能进样本」只看有没有来源，不看计数写法——`1.2万` 是可用的数据，
+    # 早先它在这里被当成不可用而整行丢掉，样本量因此悄悄少一篇。
+    usable = [row for row in latest_per_note(valid) if str(row.get("likes") or "").strip()]
     pinned = [row for row in usable if str(row.get("pinned") or "0") in ("1", "true", "True")]
     sample = [row for row in usable if row not in pinned]
-    likes = [_int_or_none(row.get("likes")) or 0 for row in sample]
+    likes, approx_notes, unparsable = _like_values(sample)
     result = SampleStats(
         account_id=account_id,
         n_total=len(usable),
@@ -79,6 +105,9 @@ def summarize(notes: list[dict[str, Any]], account_id: str = "", k_values: tuple
         n_sample=len(sample),
         likes=_like_stats(likes),
         excluded=len(scoped) - len(valid),
+        approx_rows=len(approx_notes),
+        approx_notes=approx_notes,
+        unparsable=unparsable,
     )
     result.forms = _form_breakdown(sample)
     result.burst = _burst_rates(likes, result.likes.median, k_values)
@@ -92,7 +121,9 @@ def summarize(notes: list[dict[str, Any]], account_id: str = "", k_values: tuple
 def _form_breakdown(sample: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     buckets: dict[str, list[int]] = {}
     for row in sample:
-        buckets.setdefault(str(row.get("form") or "未知"), []).append(_int_or_none(row.get("likes")) or 0)
+        value = to_count(row.get("likes"))
+        if value is not None:
+            buckets.setdefault(str(row.get("form") or "未知"), []).append(value)
     return {
         form: {"n": len(values), "mean": round(statistics.mean(values), 1)} if values else {"n": 0, "mean": 0.0}
         for form, values in sorted(buckets.items())

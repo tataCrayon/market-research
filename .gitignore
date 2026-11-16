@@ -19,3 +19,6 @@ account/
 # 账号调研产品：结构化数据输出（仅本地；保留目录占位）
 account-research/data/*
 !account-research/data/.gitkeep
+
+# 本地宿主注册产生的文件（含本机 Python 绝对路径，随机器不同，不入库）
+account-research/.host/
