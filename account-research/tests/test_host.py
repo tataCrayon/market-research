@@ -322,13 +322,20 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(replies[0]["protocol"], host.PROTOCOL_VERSION)
 
     def test_crash_still_answers_before_exiting(self):
-        """坏 JSON 不该让宿主一声不吭地死掉——那在扩展侧就是「没有回应」。"""
+        """坏 JSON 不该让宿主一声不吭地死掉——那在扩展侧就是「没有回应」。
+
+        同时钉住：stderr 必须是 UTF-8。宿主由 Chrome 直接拉起，编码取决于启动环境；
+        同一个错在 GBK 控制台起就是一片乱码，而**诊断信息的可读性不该取决于谁启动了它**。
+        （实测：同一条「协议错误」，GBK 环境下按 UTF-8 解码是 `\\ufffd`。）
+        """
         done = subprocess.run(
             [sys.executable, str(ROOT / "ar_host.py")],
             input=struct.pack("<I", 5) + b"not{",
             capture_output=True, timeout=60, cwd=str(ROOT),
         )
-        self.assertIn("协议错误", done.stderr.decode("utf-8", "replace"))
+        stderr = done.stderr.decode("utf-8", "replace")
+        self.assertIn("协议错误", stderr)
+        self.assertNotIn("\ufffd", stderr, f"stderr 不是 UTF-8：{stderr!r}")
 
 
 if __name__ == "__main__":

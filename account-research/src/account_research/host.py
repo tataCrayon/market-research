@@ -98,6 +98,13 @@ def _binary_stdio() -> tuple[BinaryIO, BinaryIO]:
     """把 stdin/stdout 切到二进制，并把 `sys.stdout` 让给 stderr。
 
     返回值是**真实**的输入输出流；之后任何 `print` 都到 stderr，不会污染协议流。
+
+    ⚠️ 第三件事：**把 stderr 也钉成 UTF-8**。Windows 控制台默认 cp936（GBK），
+    而宿主是 Chrome 直接拉起来的独立进程，它的 stderr 编码取决于启动它的那个环境。
+    中文诊断信息一旦按 GBK 写出去，读日志的人（或测试）按 UTF-8 解码就是一片乱码——
+    实测踩到：同一条 `协议错误，退出：声明 5 字节，只读到 4 字节，帧被截断`，
+    从 GBK 控制台起是 `\\xd0\\xad\\xd2\\xe9...`，从 UTF-8 环境起是正常中文。
+    **诊断信息的可读性不该取决于谁启动了它**，所以在这里显式钉死。
     """
     if os.name == "nt":  # pragma: no cover - 只在 Windows 生效
         import msvcrt
@@ -106,6 +113,9 @@ def _binary_stdio() -> tuple[BinaryIO, BinaryIO]:
         msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
     reader = sys.stdin.buffer
     writer = sys.stdout.buffer
+    for stream in (sys.stderr,):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     # 关掉文本包装：谁再 print 谁就写到 stderr 去。
     sys.stdout = sys.stderr
     return reader, writer

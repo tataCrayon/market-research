@@ -65,9 +65,28 @@ python account-research/ar.py validate                     # V1–V8
 python account-research/ar.py stats      [--account <id>] [--k 3,5]  # 篇均/中位/形式/爆文率/⬜ 覆盖度
 python account-research/ar.py add        <表> --file rows.json       # 唯一写入口，先校验后落盘
 python account-research/ar.py selftest                     # 对真实存档跑回归（无存档则 SKIP）
+python account-research/ar.py find       <关键字...> [--layer/--form/--status/--grade/--account/--min-support] [--text] [--json]
+                                                           # 跨表检索：查不到写「库内无证据」，命中带可回查编号
 ```
 
 **采集日常只需要三条**：`ar gaps`（补哪几篇）→ 采 → `ar ingest`（丢进 `account/inbox/` 一键入库）。
+
+**「能不能检索」的入口是 `ar find`**（2026-11-17 起）。它只做筛选与列行，不做归纳：
+
+| 用法 | 结果 |
+|---|---|
+| `ar find 公共性` | 命中 4 条（findings / playbook / hypotheses / verdicts 各一），每条带 `F-*` / `A-*` / `H-*` 编号 |
+| `ar find 骨架 --layer 结构` | 范围**收窄到 findings** 并在输出里说明（其余表没有 `layer` 这一列，不是没命中） |
+| `ar find --min-support 2` | 只列跨账号验证过的打法；今天的库上是 **0 条** —— Q2 未达成用一条命令就能复核 |
+| `ar find 成本 --text` | 连 `account/notes-text/` 三件套一起搜，`[正文]` / `[图上文字]` / `[评论]` 分开标 |
+| `ar find 核聚变` | `库内无证据` + 只给「去跑哪条命令」的机械下一步，不给近似结论 |
+
+**三条纪律**：① 多关键字是 AND（OR 会把「AI」搜成半个库）；
+② 互斥的筛选项（`--layer` + `--status`）直接报错，不静默丢一个——
+悄悄丢条件的后果是「看起来筛过了」；③ `notes` / `hypotheses` 检索的是折叠后的视图，
+所以只报表名不报行号（**写错行号比不写更坏**，人会照着去翻然后发现是另一条记录）。
+命中还会当场标 V4（③ 级进判决）/ V5（缺失效条件）/「支撑账号 <2」。
+详见 [../../docs/检索-20261117.md](../../docs/检索-20261117.md)。
 
 **两条通道怎么合并**：`notes` 表里同一篇可能有两行（主页一行、详情一行）。读取时按
 **（采集日, 通道优先级）** 升序做**字段级合并**——详情页补上的藏/评/时长不会覆盖主页才有的

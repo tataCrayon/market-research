@@ -54,6 +54,7 @@ from . import close as close_rules
 from . import host as host_module
 from . import hostsetup as hostsetup_module
 from . import matrix, mhtml as mhtml_module, report
+from . import find as find_module
 from .attempts import describe as describe_attempt
 from .attempts import attempts_by_note, missing_columns, summarize as summarize_attempts
 from .initialstate import REJECT_REASONS, ArchiveError, iter_note_cards, open_archive
@@ -314,6 +315,33 @@ def build_parser() -> argparse.ArgumentParser:
     matrix_parser.add_argument("--on", default=today(), help="数据截至日（写进页头）")
     matrix_parser.add_argument("--k", default="3,5", help="爆文率 K 值，逗号分隔")
     matrix_parser.set_defaults(func=cmd_matrix)
+
+    find_parser = sub.add_parser(
+        "find", help="跨表检索：按关键字与字段筛，每条命中带可回查编号（查不到就说「库内无证据」）"
+    )
+    find_parser.add_argument("keywords", nargs="*",
+                             help="关键字（空格分隔 = AND）；只给筛选条件时可为空")
+    find_parser.add_argument("--table", action="append", default=[], choices=list(find_module.TABLES),
+                             help="只搜这几张表（可重复）；省略=全部")
+    find_parser.add_argument("--layer", default="",
+                             help="只看某一层（定位/选题/结构/变现/其它）；只有 findings 有这个字段")
+    find_parser.add_argument("--form", default="", choices=["图文", "视频", "未知"],
+                             help="只看某种内容形式；只有 notes 有这个字段")
+    find_parser.add_argument("--status", default="",
+                             choices=list(schema.HYPOTHESIS_STATUS),
+                             help="只看某种假设状态；只有 hypotheses 有这个字段")
+    find_parser.add_argument("--grade", default="",
+                             help="只看某个证据等级（②/③ 这样的前缀也算：③ 同时含 ③-a 与 ③-b）")
+    find_parser.add_argument("--account", default="", help="只看某个账号的行")
+    find_parser.add_argument("--min-support", type=int, default=None, metavar="N",
+                             help="只列支撑账号数 ≥ N 的打法（N=2 即「跨账号验证过」）")
+    find_parser.add_argument("--text", action="store_true",
+                             help="连正文 / 图上文字 / 评论文件一起搜（默认只搜表）")
+    find_parser.add_argument("--limit", type=int, default=0, help="最多显示几条（0=全部，不影响计数）")
+    find_parser.add_argument("--json", action="store_true", help="输出 JSON（给下游消费）")
+    find_parser.add_argument("--data", default=str(DEFAULT_DATA))
+    find_parser.add_argument("--text-dir", default="", help="正文目录；默认 account/notes-text")
+    find_parser.set_defaults(func=cmd_find)
     return root
 
 
@@ -1800,6 +1828,42 @@ def cmd_matrix(args: argparse.Namespace) -> int:
         print(f"打开：start {target}    或双击该文件")
         return 0
     print(text)
+    return 0
+
+
+def cmd_find(args: argparse.Namespace) -> int:
+    """跨表检索。**查不到就写「库内无证据」，不给近似结论。**
+
+    PRD §1 把「不能问答」的根因归到「没有可检索单元」，§5 F7 又规定
+    「回答必须带 ≥1 条 finding 编号；查不到就答『库内无证据』」。
+    这条命令就是那个执行面：它只做筛选与列行，不做归纳——
+    归纳那一步属于模型，而模型必须**先拿到带编号的行**才允许开口。
+
+    为什么文本通道要显式开关（`--text`）：正文/图上文字/评论是长文本，留在文件里，
+    不在表里。默认把它们混进检索会让「命中」的含义变得不确定
+    （一会儿是一行结论，一会儿是一段正文），而检索的价值全在含义确定。
+    """
+    try:
+        result = find_module.search(
+            args.data,
+            args.keywords,
+            tables=args.table or None,
+            text_dir=_image_text_root(args),
+            text=args.text,
+            layer=args.layer,
+            form=args.form,
+            status=args.status,
+            grade=args.grade,
+            account=args.account,
+            min_support=args.min_support,
+        )
+    except find_module.FilterError as exc:
+        print(f"❌ {exc}")
+        return 1
+    if args.json:
+        print(json.dumps(find_module.as_payload(result), ensure_ascii=False, indent=2))
+    else:
+        print(find_module.render(result, limit=args.limit))
     return 0
 
 

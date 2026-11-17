@@ -8,18 +8,18 @@
 | 目录 | 装什么 | 状态 |
 |---|---|---|
 | `skill/` | **方法论**：SKILL.md 九步主干 + 红线 + 输出格式；references/（指标字典、采集手册、E2E 流程、数据层、HTML 模板、落地镜）；examples/（真实 case）；账号库台账（只追加） | v0.3.3：九步之后的「落库」升级为 `ar debrief` 一键拆解，方法论开始指挥宿主 runtime |
-| `src/account_research/` | **确定性处理层**（Python 标准库，零依赖）：`ar probe/parse/validate/stats/add/selftest/ingest/debrief/report/matrix/close`——存档解析、六张表、V1–V8 校验器、统计、拆解编排、报告渲染、矩阵视图、假设结案；`ar images` 图片通道（正文在图上时的取字路径，OCR 依赖可选） | ✅ v0.1.0 已对真实存档跑通（32 篇 / 置顶 2 / 样本 30）；图片通道对 5 篇真实详情页跑通（5–26 图/篇）；`debrief` 两次真跑落库；`report` 渲 markdown；`matrix` 渲离线 HTML；`close` 结案假设 |
+| `src/account_research/` | **确定性处理层**（Python 标准库，零依赖）：`ar probe/parse/validate/stats/add/selftest/ingest/debrief/report/matrix/close/find`——存档解析、六张表、V1–V8 校验器、统计、拆解编排、报告渲染、矩阵视图、假设结案、**跨表检索**；`ar images` 图片通道（正文在图上时的取字路径，OCR 依赖可选） | ✅ v0.1.0 已对真实存档跑通（32 篇 / 置顶 2 / 样本 30）；图片通道对 5 篇真实详情页跑通（5–26 图/篇）；`debrief` 两次真跑落库；`report` 渲 markdown；`matrix` 渲离线 HTML；`close` 结案假设；`find` 跨表检索（查不到写「库内无证据」） |
 | `agent/` | **Agent 契约**（八项必填 + 动作自治上限 + 5 条评估） | 草稿（缺「备份联系人」；契约见其文件） |
 | `web/` | **副端 PC Web 工具**：纯客户端解析（File API，数据不出浏览器）+ 静态托管 | 占位，未启动（触发条件见其 README） |
 | `extension/` | **浏览器扩展 v7.2**：点一下 → 面板 → **存单文件 MHTML（含图）并直接入库**。通过原生消息调本地宿主，不需要终端、不需要下载目录 | 可用，见其 README |
-| `tests/` | 验收测试：495 个单测（合成 fixture）+ `ar selftest` 真实存档回归 | ✅ 全绿 |
+| `tests/` | 验收测试：525 个单测（合成 fixture）+ `ar selftest` 真实存档回归 | ✅ 全绿 |
 | `docs/` | 产品工程文档：方向卡、PRD、case 复盘、Agent 运行记录 | 见其 README |
 | `data/` | 结构化数据（六张 CSV，gitignore，仅本地） | —— |
 | `../account/` | 采集原始存档（仓库根，gitignore，仅本地） | 本地在（卡兹克 6 份详情页 + 主页存档 + 图片） |
 
-## 当前进度（2026-11-16）
+## 当前进度（2026-11-17）
 
-- **核心工作流已跑通五层**：CLI（解析/校验/统计 495 单测 + 15 项真实存档回归）→ Skill（v0.3.23，`ar debrief` 一键拆解）→ **报告（`ar report`，不再手写）** → **矩阵（`ar matrix`，离线 HTML）** → Agent（契约 v0.1 + 一次真实运行）
+- **核心工作流已跑通六层**：CLI（解析/校验/统计 525 单测 + 15 项真实存档回归）→ Skill（v0.3.23，`ar debrief` 一键拆解）→ **报告（`ar report`，不再手写）** → **矩阵（`ar matrix`，离线 HTML）** → **检索（`ar find`，跨表 + 带编号）** → Agent（契约 v0.1 + 一次真实运行）
 - **采集是「一个插件、一次点击」**：装一次本地宿主（`ar host --register`），之后
   点扩展图标 → 按「采集」→ **直接入库**。不需要终端、不需要下载目录、不需要 `ar watch`。
   面板上能看到今日已采 / 库里篇数 / 失败在哪一层。
