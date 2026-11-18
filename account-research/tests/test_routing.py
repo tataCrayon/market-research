@@ -91,18 +91,54 @@ class TestMultiAccountRouting(unittest.TestCase):
         row = next(r for r in store.read_table(self.data, "notes") if r["note_id"] == "n-new")
         self.assertEqual(row["account_id"], ACC_B, "应按作者 id 归到 B 号，而不是默认第一个")
 
-    def test_foreign_author_is_rejected(self):
-        code = self._run([{"note_id": "n-x", "title": "外人笔记", "author_id": "ffffffffffffffffffffffff",
-                           "likes": "1"}])
-        self.assertEqual(code, 1)
-        self.assertEqual(store.read_table(self.data, "notes"), [])
+    def test_foreign_author_is_accepted_as_a_placeholder_by_default(self):
+        """外来作者**默认收下**，建成占位账号——采集不该有准入名单。
 
-    def test_new_authors_flag_creates_placeholder_account(self):
-        """显式开 --new-authors 才收外来作者，且必须建成『缺主页』的占位账号。"""
+        2026-11-18 翻的这个默认值。旧行为（默认拒收）的理由是「防止 author_id 抄错
+        时悄悄造垃圾账号」，但代价是死锁：详情页被拒 → 因为作者不在库里 →
+        而把作者放进库的唯一路径是采主页 → 而扩展采不了主页。结果什么都采不了。
+
+        判据是两者的失败方式：拒收是**静默丢数据**，占位行是**可见、可清理**的
+        （补一次主页就被 `store.upgrade_placeholders` 整行替换）。
+        """
+        code = self._run([{"note_id": "n-x", "title": "外人笔记",
+                           "author_id": "ffffffffffffffffffffffff",
+                           "author_name": "路人博主", "likes": "1"}])
+        self.assertEqual(code, 0)
+        created = [r for r in store.read_table(self.data, "accounts")
+                   if r["account_id"] == "ffffffffffffffffffffffff"]
+        self.assertEqual(len(created), 1, "外来作者应建占位账号，而不是整篇丢掉")
+        self.assertIn("缺主页存档", created[0]["note"])
+        self.assertEqual(created[0]["fans"], "", "粉丝必须留空：⬜ 不是 0")
+        note = next(r for r in store.read_table(self.data, "notes") if r["note_id"] == "n-x")
+        self.assertEqual(note["account_id"], "ffffffffffffffffffffffff")
+
+    def test_no_new_authors_flag_restores_the_old_rejection(self):
+        """想回到旧行为时用 `--no-new-authors`——**开关必须还在**。
+
+        留它的理由：author_id 真抄错时（比如正则命中了推荐流的卡片），
+        有人可能宁可不收也不想在表里留下垃圾行。那是合法选择，不该被代码剥夺。
+        """
         import argparse
         from account_research.cli import _detail_rows
         args = argparse.Namespace(data=str(self.data), ledger="", on="2026-10-28",
-                                  account="", new_authors=True)
+                                  account="", no_new_authors=True)
+        code = _detail_rows(args, [{
+            "note_id": "n-x", "title": "外人笔记", "author_id": "ffffffffffffffffffffffff",
+            "likes": "1",
+        }], allow_new=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(store.read_table(self.data, "notes"), [])
+
+    def test_placeholder_account_carries_the_author_name(self):
+        """占位账号唯一能有的信息就是作者名——不带它，`accounts` 里会多一行空白账号。
+
+        那是 `details.as_row_updates()` 2026-11-18 补 `author_name` 的原因：
+        屏幕上「⬜ 一个号」分不清是解析失败还是真的没名字。
+        """
+        import argparse
+        from account_research.cli import _detail_rows
+        args = argparse.Namespace(data=str(self.data), ledger="", on="2026-10-28", account="")
         code = _detail_rows(args, [{
             "note_id": "n-foreign", "title": "外人笔记", "author_id": "ffffffffffffffffffffffff",
             "author_name": "某新博主", "likes": "42", "collects": "7", "comments": "1",

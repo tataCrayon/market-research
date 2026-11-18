@@ -57,7 +57,13 @@ from . import matrix, mhtml as mhtml_module, report
 from . import find as find_module
 from .attempts import describe as describe_attempt
 from .attempts import attempts_by_note, missing_columns, summarize as summarize_attempts
-from .initialstate import REJECT_REASONS, ArchiveError, iter_note_cards, open_archive
+from .initialstate import (
+    REJECT_REASONS,
+    ArchiveError,
+    iter_note_cards,
+    open_archive,
+    state_sidecar_path,
+)
 from .parser import parse_account, parse_blocks, parse_notes
 from .stats import summarize
 from . import tokens as tokens_module
@@ -157,8 +163,8 @@ def build_parser() -> argparse.ArgumentParser:
     detail.add_argument("files", nargs="+")
     detail.add_argument("--on", default=today())
     detail.add_argument("--account", default="", help="账号 id（详情页读到主页未覆盖的新笔记时必填）")
-    detail.add_argument("--new-authors", action="store_true",
-                        help="作者不在库里时按作者名建占位账号（默认拒收）")
+    detail.add_argument("--no-new-authors", action="store_true",
+                        help="作者不在库里时不建占位账号、直接拒收（默认会建，见 --help 里的说明）")
     detail.add_argument("--data", default=str(DEFAULT_DATA))
     detail.add_argument("--ledger", default=str(DEFAULT_LEDGER))
     detail.add_argument("--text-dir", default="",
@@ -206,8 +212,8 @@ def build_parser() -> argparse.ArgumentParser:
     ingest = sub.add_parser("ingest", help="采件箱：自动识别 HTML 与粘贴块，入库并归档")
     ingest.add_argument("path", nargs="*", default=[], help="目录或单个文件；省略=account/inbox")
     ingest.add_argument("--on", default=today())
-    ingest.add_argument("--new-authors", action="store_true",
-                        help="作者不在库里时按作者名建占位账号（默认拒收，防止串号）")
+    ingest.add_argument("--no-new-authors", action="store_true",
+                        help="作者不在库里时不建占位账号、直接拒收（默认会建，见 --help 里的说明）")
     ingest.add_argument("--data", default=str(DEFAULT_DATA))
     ingest.add_argument("--ledger", default=str(DEFAULT_LEDGER))
     ingest.add_argument("--text-dir", default="",
@@ -243,8 +249,8 @@ def build_parser() -> argparse.ArgumentParser:
                             "例：`--pattern \"ar-page-*\" --pattern \"* - 小红书.html\"`")
     watch.add_argument("--once", action="store_true",
                        help="扫一遍就退出（放进定时任务 / 测试用）")
-    watch.add_argument("--new-authors", action="store_true",
-                       help="作者不在库里时自动建占位账号（默认拒收）")
+    watch.add_argument("--no-new-authors", action="store_true",
+                       help="作者不在库里时不建占位账号、直接拒收（默认会建）")
     watch.add_argument("--data", default=str(DEFAULT_DATA))
     watch.add_argument("--ledger", default=str(DEFAULT_LEDGER))
     watch.add_argument("--text-dir", default="",
@@ -448,19 +454,27 @@ def _detail_rows(args: argparse.Namespace, updates: list[dict[str, Any]], allow_
     `allow_new`：详情页可能读到主页存档未覆盖的新笔记。此时允许新建行，
     但**发布时间留空**（详情页只给「3天前」这种相对值，推算日期 = 编数据）。
 
-    **归属靠 author_id，不靠"库里只有一个账号"**（2026-10-28 起）：
+    归属靠 author_id，不靠"库里只有一个账号"**（2026-10-28 起）**：
     详情页里能读到作者主页链接（选择器抄自「小红书-同步开启博主首页」扩展，实测成立）。
     有了它就能做到：**一个窗口里混着 3 个账号的笔记，一条命令各归各位**。
 
-    外来作者默认**拒收**（防止 author_id 抄错时悄悄造出一个垃圾账号）。
-    要收就显式开 `--new-authors`：会按详情页里看到的作者名建一条**待补主页的占位账号**
-    （粉丝/简介等仍是 ⬜），并在 `ar status` 里提醒你补主页存档。
+    外来作者**默认收下**，建成一条待补主页的占位账号（粉丝/简介 ⬜）。
+    2026-11-18 改的默认值——原来默认拒收，理由是「防止 author_id 抄错时悄悄造一个垃圾账号」。
+    那理由仍然成立，但代价算错了：
+
+    - **采集不该有限制**。`accounts` 是「我已经建档的目标」，不是「世界的白名单」。
+      归属的真凭据是详情页里的作者链接，不是那个号在不在我的清单上。
+    - 旧的默认值造成了**死锁**：详情页被拒 ⇒ 因为作者不在库里 ⇒ 而把作者放进库的唯一
+      路径是采主页 ⇒ 而扩展采不了主页（`pageCapture` 剥掉 `<script>`）。什么都采不了。
+
+    拒绝是**静默丢数据**，占位行是**可见、可清理**的（补一次主页就被 `upgrade_placeholders`
+    整行替换）。两者选，留痕的那个更安全。要回到旧行为用 `--no-new-authors`。
     """
     notes = store.read_table(args.data, "notes")
     latest = {str(row.get("note_id")): row for row in store.latest_per_note(notes)}
     accounts = {str(row.get("account_id")) for row in store.read_table(args.data, "accounts")}
     fallback = str(getattr(args, "account", "") or (next(iter(accounts)) if len(accounts) == 1 else ""))
-    allow_new_authors = bool(getattr(args, "new_authors", False))
+    allow_new_authors = not bool(getattr(args, "no_new_authors", False))
     rows: list[dict[str, Any]] = []
     account_rows: list[dict[str, Any]] = []
     unknown: list[str] = []
@@ -524,11 +538,12 @@ def _detail_rows(args: argparse.Namespace, updates: list[dict[str, Any]], allow_
             row["author_id"] = author_id
         rows.append(row)
     if foreign:
-        print(f"⏭  拒收 {len(foreign)} 个外来作者的笔记（不是已入库的账号）：{foreign[:5]}")
-        print("   要收就加 `--new-authors`：会按看到的作者名建占位账号，粉丝/简介仍是 ⬜，需补主页存档。")
+        print(f"⏭  拒收 {len(foreign)} 个外来作者的笔记（`--no-new-authors` 说了不收）：{foreign[:5]}")
+        print("   去掉 `--no-new-authors` 就会按作者名建占位账号（粉丝/简介 ⬜，需补主页存档）。")
     if unknown:
         print(f"❌ 这些 note_id 在 notes 表里找不到（先 parse 主页存档）：{unknown}")
     if not rows and not account_rows:
+        print("❌ 没有一个文件入库成功——上面每条 ⏭ / ❌ 都写明了原因。")
         return 1
     if len(routed) > 1:
         detail = "、".join(f"{acc[-6:]}:{n} 篇" for acc, n in routed.items())
@@ -864,8 +879,13 @@ def _collect_candidates(paths: list[str]) -> tuple[list[Path], list[Path]]:
     return candidates, created
 
 
-def _expand_mhtml(candidates: list[Path]) -> list[Path]:
+def _expand_mhtml(candidates: list[Path]) -> tuple[list[Path], int]:
     """把候选里的 MHTML 就地拆成 `HTML + _files/`，再用 HTML 继续走原管道。
+
+    返回 (可继续处理的候选, 拆包失败数)。**失败数必须单独回传**：拆不出来的文件
+    也会从 candidates 里消失，若不区分，「三份全拆失败」与「采件箱本来就空」
+    在屏幕上完全一样——两者都让 `ingest` 返回 0，宿主于是回「成功」，
+    而扩展显示「已入库 0 篇，失败 0 篇」。这是最糟的一种：**什么都没做，却报成功**。
 
     为什么在**入口处**拆而不让下游认 MHTML：`images.py` / `detail.py` / OCR 全部
     按「HTML + `_files/` 同目录」工作，那条路上已经有图与笔记的绑定（含 note_id 校验）、
@@ -876,6 +896,7 @@ def _expand_mhtml(candidates: list[Path]) -> list[Path]:
     下次 ingest 会把它当两份不同的存档各入库一次（图表里出现重复行）。
     """
     result: list[Path] = []
+    broken = 0
     for path in candidates:
         if path.suffix.lower() not in mhtml_module.MHTML_SUFFIXES and not mhtml_module.looks_like_mhtml(path):
             result.append(path)
@@ -885,6 +906,7 @@ def _expand_mhtml(candidates: list[Path]) -> list[Path]:
         except (ValueError, OSError) as exc:
             print(f"❌ {path.name}：MHTML 拆不开——{exc}")
             print("   这份文件会被跳过，其余照常处理。")
+            broken += 1
             continue
         print(f"📦 {path.name} → {html_path.name} + {html_path.stem}_files/（{parts} 个子资源）")
         if parts == 0:
@@ -895,7 +917,7 @@ def _expand_mhtml(candidates: list[Path]) -> list[Path]:
         except OSError:
             pass
         result.append(html_path)
-    return result
+    return result, broken
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
@@ -912,8 +934,13 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     # MHTML 在**入口处**就被翻译成「HTML + `_files/`」——下游一个字都不用改。
     # 为什么不让下游认 MHTML：图与笔记的绑定（含 note_id 校验）、平台声明张数对账、
     # 孤立目录反查救援全都长在那条路上了，重写一遍等于把踩平的坑再踩一次。
-    candidates = _expand_mhtml(candidates)
+    candidates, broken = _expand_mhtml(candidates)
     if not candidates:
+        if broken:
+            # 拆包失败**不是「采件箱是空的」**。两者都返回 0 的话，宿主会把
+            # 「一份都没入库」当成成功回给扩展，人看到的是「已入库 0 篇」。
+            print(f"❌ {broken} 份 MHTML 都拆不开，没有可入库的文件。")
+            return 1
         if not created:
             print("采件箱是空的：%s" % "、".join(str(p) for p in roots))
         return 0
@@ -993,6 +1020,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     archive_dir = (roots[0] if roots[0].is_dir() else roots[0].parent) / "processed" / args.on
     archive_dir.mkdir(parents=True, exist_ok=True)
     moved_dirs = 0
+    moved_states = 0
     for path in handled:
         target = archive_dir / path.name
         if target.exists():
@@ -1002,6 +1030,9 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         # （实测：Kimi 那篇的 HTML 进了 processed/，26 张图一直躺在 account/ 根目录，
         #  靠 locate_files_dir 反查才救回来——能救，但那是补丁，不该是常态）。
         files_dir = path.with_name(f"{path.stem}_files")
+        # state 旁车同理：留在 inbox 里就等于把主页的数据源丢了，
+        # 而归档后的 HTML **不含**那份 data（没有 `<script>`）。
+        sidecar = state_sidecar_path(path)
         path.replace(target)
         if files_dir.is_dir():
             files_target = target.with_name(f"{target.stem}_files")
@@ -1009,12 +1040,17 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 files_target = target.with_name(f"{target.stem}-{_stamp()}_files")
             files_dir.replace(files_target)
             moved_dirs += 1
+        if sidecar.is_file():
+            sidecar.replace(state_sidecar_path(target))
+            moved_states += 1
     print(f"\n已归档 {len(handled)} 个文件 → {archive_dir}")
     if moved_dirs:
         print(f"连同 {moved_dirs} 个 `_files/` 目录一起搬走（图跟着 HTML 走，不留孤儿）")
     elif any(path.suffix.lower() in (".html", ".htm") for path in handled):
         print("⚠️ 这次没有 `_files/` 跟着搬：如果这些是详情页，图可能没存下来"
               "（Ctrl+S 要选「网页，全部」，不是「仅 HTML」）")
+    if moved_states:
+        print(f"连同 {moved_states} 份 state 旁车一起搬走（主页的粉丝/简介全靠它）")
     return 0
 
 
@@ -1621,7 +1657,10 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     # 日期在这里才取：开着过夜也不会把第二天的采集记成第一天。
                     path=[str(path)], on=args.on or today(), data=args.data,
                     ledger=args.ledger,
-                    new_authors=getattr(args, "new_authors", False),
+                    # 字段名必须与 `ingest` 的 argparse 完全一致（`no_new_authors`）。
+                    # 这里曾经拼过一个 `new_authors`，而 `_detail_rows` 读的是另一个名字——
+                    # 少字段的 Namespace 只在「恰好有详情页」时才炸（E: 靠约定维持的隐式契约）。
+                    no_new_authors=getattr(args, "no_new_authors", False),
                     text_dir=getattr(args, "text_dir", ""),
                 )
                 try:
@@ -1668,6 +1707,18 @@ def cmd_status(args: argparse.Namespace) -> int:
     numbers_done_no_body = [row for row in no_body if not _missing_fields(row)]
     need_open = len({row.get("note_id") for row in missing} | {row.get("note_id") for row in no_body})
     print(f"账号 {len(accounts)} 个 | 笔记 {len(merged)} 篇（原始 {len(notes)} 行，含多渠道观测）")
+    # 占位账号（只有详情页、没有主页存档）单独报一档。
+    #
+    # 为什么必须单列：采集不再拒收外来作者之后，随手点开的别人的笔记会在 `accounts`
+    # 里留下一行空壳——粉丝/简介/笔记总数全是 ⬜。**不报出来，它就是看不见的噪音**；
+    # 报出来，它是一份「还需补哪几个号的主页」的清单。
+    placeholders = [row for row in store.latest_per_account(accounts)
+                    if store.is_placeholder_account(row)]
+    if placeholders:
+        names = "、".join(str(row.get("nickname") or row.get("account_id"))[:12]
+                          for row in placeholders)
+        print(f"⚠️ {len(placeholders)} 个账号只有详情页、缺主页存档（粉丝/简介 ⬜）：{names}")
+        print("   补法：整页打开那个号的主页 → 点扩展图标。采到后占位行会被整行替换。")
     print(f"有正文归档 {with_text} 篇 | 有图上文字 {with_images_text} 篇"
           f" | 藏/评齐全 {len(merged) - len(missing)} 篇 | 缺藏/评 {len(missing)} 篇"
           f" | 缺正文 {len(no_body)} 篇（其中 {len(numbers_done_no_body)} 篇数字已齐）")

@@ -148,6 +148,11 @@ class DetailFields:
 
         `published_at` 是 2026-11-03 才进来的：state 里有毫秒时间戳，是**绝对时间**，
         比主页列表页更直接。早先这条通道只给相对时间，所以它一直留空。
+
+        `author_name` 是 2026-11-18 补的：外来作者现在会被建成**占位账号**，
+        而占位账号唯一能有的信息就是这个昵称。不带它，`accounts` 里会多出一行
+        名字空白的账号——`ar status` / `matrix` 里就变成「⬜ 一个号」，
+        分不清是解析失败还是真的没名字。
         """
         return {
             "note_id": self.note_id,
@@ -160,6 +165,7 @@ class DetailFields:
             "published_at": self.published_at,
             "duration": self.duration,
             "author_id": self.author_id,
+            "author_name": self.author,
         }
 
     def count_text(self, name: str) -> str:

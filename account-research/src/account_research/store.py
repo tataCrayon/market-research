@@ -205,3 +205,32 @@ def latest_hypotheses(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         merged["hypothesis_id"] = key
         latest.append(merged)
     return latest
+
+
+def latest_per_account(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """每个账号一行：同一天多次观测时**取信息最全的那一行**。
+
+    为什么不能取「最后一行」：`accounts` 的键是 `(account_id, collected_on)`，
+    同一天先建占位行、再采到真主页时，两行**并存**（占位行被 `upgrade_placeholders`
+    替换是另一条路，只在 `ar ingest` 那次提交里生效）。而读到哪一行取决于 CSV 顺序——
+    那会让 `ar status` 今天说「缺主页」、明天又不说。
+
+    取「字段最全」的那行：占位行只有 id 与昵称，真主页行有粉丝/简介/小红书号，
+    所以信息量比较能稳定地选中真行。
+    """
+    columns = schema.ACCOUNT_COLUMNS
+    grouped: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for position, row in enumerate(rows):
+        key = str(row.get("account_id") or "").strip()
+        if key:
+            grouped.setdefault(key, []).append((position, row))
+    latest: list[dict[str, Any]] = []
+    for key, group in grouped.items():
+        _, winner = max(
+            group,
+            key=lambda pair: (_filled_count(pair[1], columns), str(pair[1].get("collected_on") or ""), pair[0]),
+        )
+        merged = dict(winner)
+        merged["account_id"] = key
+        latest.append(merged)
+    return latest

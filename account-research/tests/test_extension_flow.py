@@ -49,13 +49,30 @@ class TestRealCaptureFlow(unittest.TestCase):
         )
         cls.result = result
 
-    def test_click_uploads_two_mhtml_into_the_host(self):
+    def test_click_uploads_every_collectable_page(self):
+        """一次点击要把窗口里**所有**可采页面送进宿主：主页 + 笔记页。
+
+        v8 起主页也收。原来只认 `/explore/<id>`，于是「账号从哪来」这一步只能靠人
+        Ctrl+S 手动存——而扩展存在的全部意义就是替代那次手动。
+        """
         self.assertEqual(self.result.returncode, 0,
                          self.result.stdout + self.result.stderr)
         self.assertIn("完整流程通过", self.result.stdout)
         # 分块真的被执行了，而不是「一条消息发完」的运气
         self.assertRegex(self.result.stdout, r"分 \d+ 块")
         self.assertNotRegex(self.result.stdout, r"分 1 块")
+        self.assertIn('"saved": 3', self.result.stdout)
+        self.assertIn('"failed": 0', self.result.stdout)
+
+    def test_profile_upload_carries_the_page_state(self):
+        """主页必须把 `__INITIAL_STATE__` 的子树一起传上来。
+
+        这条守的是 v8 的核心：`pageCapture` 只序列化渲染后的 DOM，**把 `<script>` 剥掉**，
+        而主页的粉丝/简介/笔记列表全在脚本里。不带 state 的主页存档能「成功入库」，
+        然后变成一个**没有任何数据的账号**——成功和失败在界面上长得一模一样。
+        """
+        self.assertIn("profile 62c98736000000001501e075", self.result.stdout)
+        self.assertRegex(self.result.stdout, r"profile \S+  \d+ B  分 \d+ 块  state \d+ 字符")
 
     def test_file_backed_blob_is_read_by_filereader(self):
         """这是本次修复的**唯一实质断言**。
@@ -71,9 +88,9 @@ class TestRealCaptureFlow(unittest.TestCase):
 
         坏的是那个句柄（它背后的数据此刻还不在），不是那一次调用。
         只重读会一直失败——而失败信息看起来会像「读法全试过了还是不行」。
-        沙箱里 tab1 第一次存档读不出来，所以存档次数必须是 3 而不是 2。
+        沙箱里 tab1 第一次存档读不出来，所以 3 篇的存档次数必须是 4 而不是 3。
         """
-        self.assertIn("共 3 次", self.result.stdout)
+        self.assertIn("共 4 次", self.result.stdout)
 
     def test_capture_fails_loudly_in_a_service_worker(self):
         """同一段代码在 service worker 里必须**明确失败**，而且说清原因。
@@ -124,6 +141,59 @@ class TestHarnessFidelity(unittest.TestCase):
 
     def test_exposes_last_error_like_chrome(self):
         self.assertIn("get lastError()", self.source)
+
+
+@unittest.skipUnless(shutil.which("node"), "没装 node：跳过（它只用于这个沙箱回归）")
+class TestProbePage(unittest.TestCase):
+    """`probePage` 的**真实执行**——它在主流程桩里是被替换掉的。
+
+    `extension_click.js` 把 `chrome.scripting.executeScript` 打桩了，所以
+    `probePage` 一行都没跑过。而 v8 的全部新逻辑（主页/笔记的区分、
+    `__INITIAL_STATE__` 的摘取与上限、弹层判据）都在它里面。
+    桩掉它，等于把「这次改动最可能出错的地方」排除在测试之外。
+
+    这条 harness 用一个只实现必要接口的假 DOM 真跑它七次（主页 / 未渲染主页 /
+    整页笔记 / 弹层 / 超大 state / 不可序列化的子树 / 搜索页）。
+    """
+
+    HARNESS = Path(__file__).resolve().parent / "harness" / "probe_page.js"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.result = subprocess.run(
+            ["node", str(cls.HARNESS), str(EXT / "capture.js")],
+            capture_output=True, text=True, encoding="utf-8", timeout=60,
+        )
+
+    def test_all_scenarios_hold(self):
+        self.assertEqual(self.result.returncode, 0,
+                         self.result.stdout + self.result.stderr)
+        self.assertIn("七个场景全部符合预期", self.result.stdout)
+
+    def test_profile_is_recognised_and_carries_state(self):
+        line = next((row for row in self.result.stdout.splitlines()
+                     if row.startswith("主页：")), "")
+        self.assertIn('"kind":"profile"', line)
+        self.assertIn('"stateKeys":["user"]', line,
+                      "主页应当只摘 user 子树；摘多了是白占带宽，摘少了解析不了")
+
+    def test_an_oversized_state_is_reported_not_silently_dropped(self):
+        line = next((row for row in self.result.stdout.splitlines()
+                     if row.startswith("超大 state：")), "")
+        self.assertIn('"tooLarge":true', line)
+        self.assertIn('"chars"', line, "只报「太大」而不报多大，人无法判断差多少")
+
+    def test_a_modal_is_told_apart_from_a_full_page(self):
+        line = next((row for row in self.result.stdout.splitlines()
+                     if row.startswith("弹层：")), "")
+        self.assertIn('"reason":"modal"', line)
+
+    def test_harness_does_not_use_a_real_dom_library(self):
+        """不引 jsdom：多一个依赖就多一处「桩与真浏览器不一样」的未知，
+        而这里验的是**我们自己写的取值逻辑**，不是选择器在某个 DOM 实现下的行为。"""
+        source = self.HARNESS.read_text(encoding="utf-8")
+        self.assertNotIn("require('jsdom')", source)
+        self.assertNotIn("require(\"jsdom\")", source)
 
 
 class TestArchitectureSplit(unittest.TestCase):

@@ -193,6 +193,40 @@ class TestChunkedUpload(unittest.TestCase):
         self.assertEqual(self.uploads["a"].bytes(), b"AAA")
         self.assertEqual(self.uploads["b"].bytes(), b"BBB")
 
+    def test_begin_carries_the_page_state(self):
+        """v2 协议：`begin` 里带 `state`（页面脚本状态的子树）。
+
+        为什么必须挂在 `begin` 上而不是单独一条消息：**state 与这次存档是一对**。
+        拆开发的话，宿主可能收到「有 MHTML 没 state」的上传，主页解析失败——
+        而失败要从两条独立消息的时序里推，等于让排查变成猜。
+        """
+        state = {"user": {"userPageData": {"basicInfo": {"nickname": "主页"}}}}
+        reply = host.handle({"type": "begin", "session": "p", "kind": "profile",
+                             "note_id": "acc1", "state": state}, self.uploads)
+        self.assertTrue(reply["ok"])
+        self.assertEqual(self.uploads["p"].state, state)
+
+    def test_state_is_optional(self):
+        """详情页靠 DOM 也能解析，所以 `state` 缺席**不是错误**。
+
+        把它当必填，会让每一篇详情页都失败——而它们本来一个字段都不缺。
+        """
+        reply = host.handle({"type": "begin", "session": "n", "note_id": "n1"}, self.uploads)
+        self.assertTrue(reply["ok"])
+        self.assertEqual(self.uploads["n"].state, {})
+
+    def test_malformed_state_is_ignored_not_crashed(self):
+        """扩展传了非对象（`null` / 字符串 / 数组）时，当成「没带」而不是抛异常。
+
+        宿主崩掉的表现是端口断开，而 Chrome 只会说一句「Native host has exited.」——
+        为了一份可选数据把整条通道弄死，不划算。
+        """
+        for bad in (None, "abc", [1, 2], 42):
+            reply = host.handle({"type": "begin", "session": "x", "note_id": "n",
+                                 "state": bad}, self.uploads)
+            self.assertTrue(reply["ok"], bad)
+            self.assertEqual(self.uploads["x"].state, {}, bad)
+
     def test_unknown_type_is_answered(self):
         reply = host.handle({"type": "什么"}, self.uploads)
         self.assertFalse(reply["ok"])
@@ -320,6 +354,94 @@ class TestEndToEnd(unittest.TestCase):
         replies = self._run_host([{"type": "hello", "id": 0}], self.data)
         self.assertEqual(len(replies), 1)
         self.assertEqual(replies[0]["protocol"], host.PROTOCOL_VERSION)
+
+    def test_profile_lands_without_a_pre_existing_account(self):
+        """**v8 的主线**：一次点击采一个从没见过的号的主页，必须真的入库。
+
+        这条覆盖了三个改动叠起来才成立的路径：
+        ① 扩展带上 `state`（`pageCapture` 剥了 `<script>`，主页全靠它）；
+        ② 宿主把它落成旁车；
+        ③ 归属校验不再拒收外来作者。
+
+        少任何一环，这条都会红——而这正是昨天用户点下去得到「宿主没回结果」的那条路。
+        """
+        import base64
+
+        from tests.mhtml_samples import build_detail_mhtml
+        from tests.test_state_sidecar import PROFILE_HTML_NO_SCRIPT, PROFILE_STATE
+
+        payload = build_detail_mhtml(PROFILE_HTML_NO_SCRIPT)
+        encoded = base64.b64encode(payload).decode("ascii")
+        messages = [
+            {"type": "hello", "id": 0},
+            {"type": "begin", "session": "pf", "kind": "profile",
+             "note_id": "target-sidecar", "state": PROFILE_STATE, "id": 1},
+        ]
+        step = 20_000
+        for index in range(0, len(encoded), step):
+            messages.append({"type": "chunk", "session": "pf",
+                             "data": encoded[index:index + step], "id": 2})
+        messages.append({"type": "end", "session": "pf", "id": 3})
+
+        replies = self._run_host(messages, self.data)
+        last = replies[-1]
+        self.assertTrue(last.get("ok"), f"主页入库失败：{last}")
+
+        from account_research import store
+
+        accounts = store.read_table(self.data, "accounts")
+        mine = [row for row in accounts if str(row.get("account_id")) == "target-sidecar"]
+        self.assertEqual(len(mine), 1, "账号没建出来")
+        self.assertEqual(str(mine[0].get("nickname")), "旁车测试号",
+                         "昵称没解析出来——state 没送到或旁车没被读到")
+        self.assertEqual(str(mine[0].get("fans")), "1000")
+        notes = store.read_table(self.data, "notes")
+        self.assertEqual(len([r for r in notes if str(r.get("account_id")) == "target-sidecar"]), 2)
+
+    def test_failure_carries_a_human_reason(self):
+        """失败的响应里**必须有 error**，而且要是人话。
+
+        v8 之前宿主只回 `ok:false`，扩展只能显示「宿主没回结果」——用户昨天看到的就是这句。
+        而真实原因（拒收外来作者）明明已经打印在 log 里了。
+        """
+        import base64
+
+        # 一份根本不是 MHTML 的字节：拆包会失败，`ar ingest` 返回非 0。
+        junk = b"<html><body>not an mhtml archive</body></html>"
+        encoded = base64.b64encode(junk).decode("ascii")
+        replies = self._run_host([
+            {"type": "hello", "id": 0},
+            {"type": "begin", "session": "bad", "note_id": "n0", "id": 1},
+            {"type": "chunk", "session": "bad", "data": encoded, "id": 2},
+            {"type": "end", "session": "bad", "id": 3},
+        ], self.data)
+        last = replies[-1]
+        self.assertFalse(last.get("ok"))
+        reason = str(last.get("error") or "")
+        self.assertTrue(reason, "失败却没给原因：扩展只能显示一句「宿主没回结果」")
+        self.assertNotIn("宿主没回结果", reason)
+        self.assertIn("MHTML", reason, f"原因没说清是哪一类坏：{reason}")
+
+    def test_reason_from_log_prefers_failure_over_warning(self):
+        """原因要取**结论那一句**：❌ > ⏭ > ⚠️，同级取最后一条。
+
+        一个文件只有一个结局；把开头的 ⚠️ 当原因是典型的「答非所问」。
+        """
+        log = "\n".join([
+            "📦 x.mhtml → x.html + x_files/（2 个子资源）",
+            "⚠️ 这次没有 `_files/` 跟着搬",
+            "✅ 某篇：详情页",
+            "⏭  拒收 1 个外来作者的笔记",
+            "❌ 没有一个文件入库成功",
+        ])
+        self.assertEqual(host.reason_from_log(log), "没有一个文件入库成功")
+
+    def test_reason_from_log_falls_back_to_skip(self):
+        log = "⚠️ 缺图\n⏭  这些 note_id 在 notes 表里找不到：['n9']"
+        self.assertEqual(host.reason_from_log(log), "这些 note_id 在 notes 表里找不到：['n9']")
+
+    def test_reason_from_log_is_empty_when_nothing_matches(self):
+        self.assertEqual(host.reason_from_log("一切正常"), "")
 
     def test_crash_still_answers_before_exiting(self):
         """坏 JSON 不该让宿主一声不吭地死掉——那在扩展侧就是「没有回应」。

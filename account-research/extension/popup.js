@@ -38,6 +38,11 @@ function renderResult(result) {
       + `（${Math.round((result.bytes || 0) / 1024)} KB）`
     : `已入库 0 篇${result.failed ? `，失败 ${result.failed} 篇` : ""}`;
   box.appendChild(el("div", "line " + (result.saved > 0 ? "good" : "bad"), head));
+  // 主页单独报一句：它是「账号从哪来」的唯一入口，而它的失败和笔记的失败
+  // 处理方式完全不同（笔记能靠 DOM 解析，主页非要 state 不可）。
+  if (result.profiles) {
+    box.appendChild(el("div", "line note", `其中主页 ${result.profiles} 个（粉丝/简介靠它）`));
+  }
 
   // 失败一律折进 `<details>`：标题写「哪一层」，展开看原文。
   const failures = result.failures || [];
@@ -60,6 +65,10 @@ function renderResult(result) {
   if (result.withoutState) {
     box.appendChild(el("div", "line note",
       `${result.withoutState} 篇没读到页面数据（分享数/精确发布日会缺，这是预期内的）`));
+  }
+  if (result.stateTooLarge) {
+    box.appendChild(el("div", "line note",
+      `${result.stateTooLarge} 个页面数据超过上限，这次没带——主页会因此失败，笔记不受影响`));
   }
   if (result.needReload) {
     box.appendChild(el("div", "line note",
@@ -141,8 +150,7 @@ $("capture").addEventListener("click", async () => {
     $("progress").hidden = true;
     const summary = result.saved > 0
       ? `已入库 ${result.saved} 篇${result.failed ? `，失败 ${result.failed} 篇` : ""}`
-      : `已入库 0 篇${result.failed ? `，失败 ${result.failed} 篇` : ""}`;
-    const detail = [summary].concat(result.failures || []).join("\n");
+      : `已入库 0 篇${result.failed ? `，失败 ${result.failed} 篇` : ""}`;    const detail = [summary].concat(result.failures || []).join("\n");
     setBadge(result.saved > 0 ? `✓${result.saved}` : "!", result.saved > 0 ? "ok" : "err", detail);
     await refresh();
   } catch (error) {

@@ -49,7 +49,7 @@
 |---|---|
 | 必读事实源（启动顺序） | ① [`skill/SKILL.md`](../skill/SKILL.md) ② [`skill/references/overall-workflow.md`](../skill/references/overall-workflow.md) ③ [`skill/references/xiaohongshu-metrics.md`](../skill/references/xiaohongshu-metrics.md) ④ `data/` 下的表 ⑤ 上一位同账号的 `findings`/`playbook`（避免重复劳动） |
 | 输入 | 一个已 `parse` 入库的 `account_id`；或一份待解析的主页存档路径 |
-| 应拒绝的输入 | 搜索页/推荐流/详情页 HTML（让 CLI 拒收并解释）；任何「帮我爬一下」；任何要求对账号背后自然人建档评分排序 |
+| 应拒绝的输入 | 搜索页/推荐流（CLI 会判出来并解释）；任何「帮我爬一下」；任何要求对账号背后自然人建档评分排序。**注意：详情页 HTML 不再算「该拒绝」**——2026-11-18 起外来作者会建成占位账号（`ar status` 里单列「缺主页存档」），所以详情页是合法输入，只是账号行不完整 |
 | 成功输出 | ① `ar validate` **0 ERROR** ② 每个账号一行 `verdicts`（五选一 + 三件套）③ 每条结论一行 `findings`（带 grade + evidence_ref）④ 每条打法带 `failure_condition` ⑤ 报告的每个数字能在 `notes`/`findings` 里点回 |
 | 停止条件 | 连续 3 次工具失败；`validate` 连续 2 轮无法修绿；⬜ 阻塞定位/选题层 → 停并按 `⏸` 交付，不得硬凑 |
 | 停止后找谁 | owner；交付证据 = `ar validate` 输出 + 未取证清单 + 已尝试的取证路径 |

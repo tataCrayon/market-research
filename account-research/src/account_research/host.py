@@ -66,7 +66,11 @@ from typing import Any, BinaryIO
 HOST_NAME = "com.account_research.capture"
 EXTENSION_ID = "onabfkpgiapeffmjogkdnhllamejdehm"
 # 协议版本。扩展与宿主各自声明，不一致时扩展会明说「版本不匹配」而不是静默乱跑。
-PROTOCOL_VERSION = 1
+#
+# ⚠️ v1 → v2（2026-11-18）：`begin` 多了 `state`（页面脚本状态的子树）。
+# 为什么不兼容：v1 的宿主会**忽略**这个消息字段，于是扩展以为「state 已送达」，
+# 而主页解析会失败——失败点离原因很远。升版本让旧宿主直接说「版本不匹配」。
+PROTOCOL_VERSION = 2
 
 # 单条消息的硬上限。分块后实际远小于它；这个值只用来挡掉明显坏掉的长度前缀。
 MAX_MESSAGE_BYTES = 64 * 1024 * 1024
@@ -169,9 +173,13 @@ class Upload:
     只在内存里拼字节，**不落临时文件**直到收完——半途断开时不该在磁盘上留下垃圾。
     """
 
-    def __init__(self, note_id: str = "", collected_on: str = "") -> None:
+    def __init__(self, note_id: str = "", collected_on: str = "",
+                 state: dict[str, Any] | None = None) -> None:
         self.note_id = note_id
         self.collected_on = collected_on
+        # 页面脚本状态（扩展在 `begin` 里带上来）。`pageCapture` 把 `<script>` 剥了，
+        # 所以主页的 `userPageData` / `noteCards` 全靠这一份。
+        self.state: dict[str, Any] = dict(state or {})
         self.parts: list[bytes] = []
         self.chunks = 0
 
@@ -196,6 +204,7 @@ def ingest_payload(
     collected_on: str = "",
     *,
     data_dir: str | Path | None = None,
+    state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """把一份 MHTML 字节送进 `ar ingest` 的同一条代码路径，返回结果摘要。
 
@@ -205,8 +214,13 @@ def ingest_payload(
 
     `cli.main` 会打印一大段面向人的进度。那些文字**不能进协议流**，
     所以在这里捕获，作为 `log` 字段随响应返回——用户在扩展的提示里能看到它。
+
+    `state` 是扩展从页面 `window.__INITIAL_STATE__` 里摘出来的子集。
+    `pageCapture` 会把 `<script>` 整段剥掉，主页因此失去全部数据来源；
+    把它落成 `<stem>.state.json` 旁车，`open_archive` 会优先读它。
     """
     from . import cli
+    from .initialstate import STATE_SIDECAR_SUFFIX
 
     if data_dir is None:
         data_dir = cli.DEFAULT_DATA
@@ -214,12 +228,20 @@ def ingest_payload(
         name = f"ar-page-{note_id or 'unknown'}.mhtml"
         source = Path(tmp) / name
         source.write_bytes(payload)
+        # 旁车先写：MHTML 拆包后 HTML 与它同名（只换后缀），所以两者天然配对。
+        if state:
+            (Path(tmp) / f"{source.stem}{STATE_SIDECAR_SUFFIX}").write_text(
+                json.dumps(state, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
         argv = [
             "ingest", str(source),
             "--data", str(data_dir),
             "--on", collected_on or cli.today(),
-            # 上传通道不该顺手往采集者的证据库里建号：作者不在库里就该拒收。
-            # 需要建号时人会在命令行显式加 `--new-authors`。
+            # 外来作者**默认收下**（2026-11-18 起默认值翻过来了），所以这里不再传
+            # `--new-authors`。扩展能采到的页面都是人亲手打开的那个标签页，
+            # 这比任何正则都可靠；而「作者不在我的目标名单里」不该等于「把这篇丢掉」。
+            # 建出来的是带「缺主页存档」标记的占位账号，采到主页后会被整行替换。
         ]
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
@@ -228,13 +250,40 @@ def ingest_payload(
             except SystemExit as exc:  # argparse 在参数不对时走这里
                 code = int(exc.code or 1)
         log = buffer.getvalue()
-    return {
+    result: dict[str, Any] = {
         "ok": code == 0,
         "exit_code": code,
         "note_id": note_id,
         "bytes": len(payload),
         "log": log[-4000:],  # 只回传尾部：完整日志留在 stderr，避免消息过大
     }
+    if code != 0:
+        # **失败必须带上原因。** 只回 `ok: false` 的话，扩展只能显示
+        # 「宿主没回结果」——而真实原因（拒收 / 找不到底行 / 存档坏）就躺在 log 里，
+        # 面板默认不展开它。实测踩过：用户看到「宿主没回结果」，实际是「拒收外来作者」。
+        result["error"] = reason_from_log(log) or f"入库失败（exit {code}），日志里没有可读的原因"
+    return result
+
+
+def reason_from_log(log: str) -> str:
+    """从 `ar ingest` 的输出里挑出**一句能直接给人看的原因**。
+
+    优先级：❌（失败）> ⏭（跳过/拒收）> ⚠️（警告）。取**最后一条**——
+    一个文件只可能有一个结局，最后一句才是它的结论。
+    """
+    candidates: list[str] = []
+    for line in log.splitlines():
+        text = line.strip()
+        if text.startswith(("❌", "⏭", "⚠️")):
+            candidates.append(text)
+    if not candidates:
+        return ""
+    for mark in ("❌", "⏭", "⚠️"):
+        for text in reversed(candidates):
+            if text.startswith(mark):
+                # 去掉前缀符号：扩展会把原因放进「入库✗ 原因」这一行，符号会重复。
+                return text.lstrip("❌⏭⚠️ ").strip()
+    return candidates[-1]
 
 
 # ---- 分发 ----
@@ -260,9 +309,12 @@ def handle(message: dict[str, Any], uploads: dict[str, Upload],
                      overhead=JSON_OVERHEAD_BYTES, host=HOST_NAME)
 
     if kind == "begin":
+        raw_state = message.get("state")
         uploads[session] = Upload(
             note_id=str(message.get("note_id") or ""),
             collected_on=str(message.get("collected_on") or ""),
+            # `state` 允许缺席：详情页靠 DOM 也能解析，只有主页非要它不可。
+            state=raw_state if isinstance(raw_state, dict) else None,
         )
         return reply(ok=True, chunks=0)
 
@@ -285,7 +337,8 @@ def handle(message: dict[str, Any], uploads: dict[str, Upload],
             return reply(ok=False, error="这份存档是 0 字节，页面可能还没渲染完")
         try:
             result = ingest_payload(upload.bytes(), upload.note_id,
-                                    upload.collected_on, data_dir=data_dir)
+                                    upload.collected_on, data_dir=data_dir,
+                                    state=upload.state)
         except Exception as exc:  # 任何失败都要回一句人看得懂的话，不能静默
             return reply(ok=False, error=f"入库失败：{type(exc).__name__}: {exc}")
         return reply(**result)

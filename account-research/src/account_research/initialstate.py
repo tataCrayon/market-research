@@ -35,10 +35,31 @@ class Archive:
     target_user_ids: tuple[str, ...] = ()
     viewer_user_id: str = ""
     note_items: tuple[dict[str, Any], ...] = field(default=())
+    # state 是从哪来的。三个值，**必须能区分**：
+    # - `html`：存档自带的 `<script>` 里就有（Ctrl+S 通道）
+    # - `sidecar`：从同名 `.state.json` 旁车读到（扩展通道，`pageCapture` 把脚本剥了）
+    # - `none`：没有 state，只有 DOM（详情页可以这么跑；主页不行）
+    # 不记下来，事后没人能回答「这个粉丝数是从页面脚本读的，还是从哪来的」。
+    state_source: str = "html"
 
     @property
     def usable(self) -> bool:
         return self.kind == "profile"
+
+
+STATE_FROM_HTML = "html"
+STATE_FROM_SIDECAR = "sidecar"
+STATE_ABSENT = "none"
+
+# 扩展通道（`pageCapture`）会把 `<script>` 整段剥掉，`__INITIAL_STATE__` 随之消失。
+# 主页解析完全依赖 state（`userPageData` + `noteCards`），所以那条通道必须把 state
+# 单独带回来，落成与 HTML 同名的旁车文件。
+#
+# **为什么是旁车而不是塞回 HTML**：MHTML 拆包（`mhtml.convert`）已经是踩平的路，
+# 往 HTML 里注入脚本等于让「一份存档」有两种形状；而旁车是**可选增强**——
+# 没有它，详情页照常走 DOM 解析，行为与今天完全一致。
+STATE_SIDECAR_SUFFIX = ".state.json"
+
 
 
 def _brace_match(text: str, start: int) -> str:
@@ -179,6 +200,49 @@ def _is_token_boundary(text: str, start: int, end: int) -> bool:
     return not (before.isalnum() or before in "_$") and not (after.isalnum() or after in "_$")
 
 
+def state_sidecar_path(archive_path: str | Path) -> Path:
+    """`x.html` → `x.state.json`。
+
+    ⚠️ 不用 `Path.with_suffix`：它的入参是**单段后缀**，
+    传 `.state.json` 在不同 Python 版本上行为不一致（3.14 起会拒多段）。
+    拼字符串在哪个版本上都对。
+    """
+    path = Path(archive_path)
+    return path.parent / f"{path.stem}{STATE_SIDECAR_SUFFIX}"
+
+
+def read_state_sidecar(archive_path: str | Path) -> dict[str, Any] | None:
+    """读同名旁车 `.state.json`。没有就返回 None——**缺席不是错误**。
+
+    为什么允许缺席：`Ctrl+S` 通道的 state 本来就在 HTML 里；详情页没有 state 也能走 DOM。
+    把「没旁车」当成错误，会让每一条老通道都开始报错。
+    """
+    path = state_sidecar_path(archive_path)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ArchiveError(
+            f"{path.name} 不是合法 JSON（{exc}）：旁车坏了，"
+            f"删掉它重采一次即可——不要手改，它是脚本状态的原样拷贝。"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ArchiveError(f"{path.name} 顶层不是对象：旁车应当是 {{}} 形状的 state。")
+    return payload
+
+
+def write_state_sidecar(archive_path: str | Path, state: dict[str, Any]) -> Path:
+    """把 state 写成旁车。**不覆盖已有旁车**——和所有证据一样，只增不改。"""
+    path = state_sidecar_path(archive_path)
+    if not path.exists():
+        path.write_text(
+            json.dumps(state, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+    return path
+
+
 def parse_html(html: str) -> dict[str, Any]:
     """HTML 文本 → `__INITIAL_STATE__` 对象。存档只读一次，避免大文件重复 IO。"""
     literal = clean_js_literals(extract_literal(html))
@@ -289,6 +353,22 @@ REJECT_REASONS = {
 
 
 def open_archive(path: str | Path) -> Archive:
+    """读一份存档。**state 有三个来源，按可靠性排序试，直到有一个能用。**
+
+    为什么要三档而不是「HTML 里没有就报错」：`pageCapture`（扩展通道）会把
+    `<script>` 整段剥掉，`__INITIAL_STATE__` 随之消失——那不是存档坏了，
+    只是这条通道不带脚本。而主页解析**完全依赖** state（`userPageData` + `noteCards`），
+    所以扩展必须把 state 单独带回来落成旁车。三档分别是：
+
+    | 来源 | 什么时候有 | 谁能用 |
+    |---|---|---|
+    | `html` | Ctrl+S「网页，全部」 | 主页 + 详情页 |
+    | `sidecar` | 扩展采集（`<name>.state.json`） | 主页 + 详情页 |
+    | `none` | 只有 DOM | 仅详情页（og:url 可判） |
+
+    **三档必须都留下痕迹**（`Archive.state_source`），否则事后没人能回答
+    「这个粉丝数是从页面脚本读的，还是从别处来的」。
+    """
     file_path = Path(path)
     if not file_path.is_file():
         raise ArchiveError(f"文件不存在：{file_path}")
@@ -296,14 +376,29 @@ def open_archive(path: str | Path) -> Archive:
     title = extract_title(html)
     match = re.search(r'og:url[^>]*content="([^"]+)"', html)
     og = match.group(1) if match else ""
+
+    state: dict[str, Any] = {}
+    source = STATE_ABSENT
     try:
         state = parse_html(html)
-    except ArchiveError:
-        # 详情页不一定非要 __INITIAL_STATE__：详情字段全在渲染后的 DOM 里。
-        # 只要 og:url 指向 /explore/<id>，就按详情页处理（主页没有这条 og:url）。
-        if og and re.search(r"/(?:explore|discovery/item)/[0-9a-f]{24}", og, re.I):
-            return Archive(path=file_path, kind="note_detail", state={}, title=title, og_url=og, html=html)
-        raise
+        source = STATE_FROM_HTML
+    except ArchiveError as exc:
+        # ① 先试旁车：扩展通道的 state 在这里。
+        sidecar = read_state_sidecar(file_path)
+        if sidecar:
+            state = sidecar
+            source = STATE_FROM_SIDECAR
+        # ② 还是空：详情页可以只靠 DOM（主页不行，它的数据全在 state 里）。
+        elif og and re.search(r"/(?:explore|discovery/item)/[0-9a-f]{24}", og, re.I):
+            return Archive(path=file_path, kind="note_detail", state={}, title=title,
+                           og_url=og, html=html, state_source=STATE_ABSENT)
+        else:
+            raise ArchiveError(
+                f"{exc} 也没有 {file_path.stem}{STATE_SIDECAR_SUFFIX} 旁车——"
+                f"这条通道（扩展的 pageCapture）会把 <script> 剥掉，"
+                f"主页必须靠旁车里的 state 才能解析。"
+                f"用扩展重采一次，或改用 Ctrl+S 选「网页，全部」。"
+            ) from exc
     return Archive(
         path=file_path,
         kind=classify(state, title, og),
@@ -314,4 +409,5 @@ def open_archive(path: str | Path) -> Archive:
         target_user_ids=target_user_ids(state),
         viewer_user_id=viewer_user_id(state),
         note_items=flatten_note_items(state),
+        state_source=source,
     )

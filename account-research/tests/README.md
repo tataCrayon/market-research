@@ -14,8 +14,25 @@
 - 每个断言必须可证伪；发现历史数字与存档冲突时，**要么证明是时点漂移并写进 `volatile` 豁免，要么改代码**——不许改断言迁就代码
 - 解析器验收标准（AGENTS.md §3）：对 `account/` 真实存档跑通，产出与报告数据节一致
 
-## 当前覆盖（525 例 + 15 项回归断言）
+## 当前覆盖（559 例 + 15 项回归断言）
 
+- `test_state_sidecar.py`：**state 旁车**——`pageCapture` 剥掉 `<script>` 之后，
+  主页的数据源只能靠 `<stem>.state.json` 回来。钉住：按 stem 对齐（MHTML 拆包后只剩
+  `.html`，两边必须指向同一个旁车）、**不覆盖已有旁车**（同一天采两次，第二份会盖掉
+  第一份的笔记列表）、**HTML 自带 state 时不读旁车**（陈旧旁车会静默盖掉更新的数据）、
+  `state_source` 三值可区分（`html` / `sidecar` / `none`——可信度不是一回事）、
+  **详情页无 state 时行为一个字段都不变**（旁车是可选增强，不是新的必需品）、
+  归档时旁车跟着 HTML 一起搬走
+- `test_host.py` 的 v8 段：协议 v2 的 `state` 字段（必挂在 `begin` 上——它与这次存档是一对）、
+  `state` 缺席/非对象都当「没带」而不是崩掉、**失败必带 `error`**（从日志里按
+  ❌ > ⏭ > ⚠️ 挑结论那一句）、**从没见过的号采主页能一路入库**（三处改动缺一即红）
+- `harness/probe_page.js`（由 `test_extension_flow.py::TestProbePage` 驱动）：
+  **`probePage` 的真实执行**。主流程 harness 把 `chrome.scripting.executeScript` 桩掉了，
+  所以 `probePage` 以前一行都没跑过——而 v8 的全部新逻辑都在它里面。这里用一个
+  只实现必要接口的**假 DOM**（不引 jsdom）真跑七个场景：主页认得出且只摘 `user` 子树、
+  未渲染的主页明确报 `profile_not_rendered`、整页笔记带上 `note` 子树、
+  弹层报 `modal`、超大 state 报 `tooLarge` 并给出实际大小、
+  **某棵子树不可序列化时只把那一棵变成 `null`**（不是整份放弃）、搜索页明确拒
 - `test_find.py`：跨表检索——**多关键字是 AND**（OR 会把「AI」搜成半个库）、
   每条命中带可回查编号（`F-*` / `A-*` / `H-*` / `note_id`）、
   `notes` 与 `hypotheses` 检索的是**折叠后的视图**（同一篇两条通道只出一次；假设只看最新状态），

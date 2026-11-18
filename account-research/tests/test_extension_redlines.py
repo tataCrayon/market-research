@@ -130,9 +130,12 @@ class TestManifest(unittest.TestCase):
 
     def test_version_and_description_match_what_it_saves(self):
         """清单里的话必须对得上行为。v2 的描述写「各存一个 txt」——那正是要改掉的老行为。"""
-        self.assertEqual(self.manifest["version"], "7.2.1")
+        self.assertEqual(self.manifest["version"], "8.0.0")
         self.assertIn("MHTML", self.manifest["description"])
         self.assertIn("含图", self.manifest["description"])
+        # v8：描述里必须出现「主页」。它不再只是笔记采集器——
+        # 而「能不能采主页」正是上一版把自己卡死的那条边界。
+        self.assertIn("主页", self.manifest["description"])
         self.assertIn("MHTML", self.manifest["action"]["default_title"])
         self.assertNotIn("txt", self.manifest["description"])
 
@@ -338,9 +341,13 @@ class TestClickGivesVisibleFeedback(unittest.TestCase):
         self.assertIn('type: "AR_BADGE"', self.popup)
         self.assertIn("AR_BADGE", self.background)
 
-    def test_reports_when_there_are_no_note_tabs(self):
-        """最常见的一种「没反应」：当前窗口里根本没有笔记页。必须明说。"""
-        self.assertIn("没有小红书笔记页", self.capture)
+    def test_reports_when_there_are_no_collectable_tabs(self):
+        """最常见的一种「没反应」：当前窗口里根本没有可采的页面。必须明说。
+
+        v8 起「可采」= 主页 **或** 笔记页，所以措辞跟着变了——
+        仍然**不能**是静默返回一个空结果。
+        """
+        self.assertIn("没有小红书主页或笔记页", self.capture)
 
     def test_failures_are_shown_in_the_panel(self):
         """失败必须出现在面板上，而且带**层次**（识别页面/存档页面/转换存档/入库）。"""

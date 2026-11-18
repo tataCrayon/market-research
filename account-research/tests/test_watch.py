@@ -218,9 +218,28 @@ class TestWatchOnce(unittest.TestCase):
         self.assertIn("本次自动入库 1 个文件", output, f"详情页没走通：\n{output}")
         self.assertNotIn("入库失败", output, f"详情页入库报错了：\n{output}")
         self.assertNotIn("no_ocr", output, "Namespace 少了字段")
+        self.assertNotIn("no_new_authors", output, "Namespace 又少了一个字段")
         rows = store.read_table(self.data, "notes")
         self.assertTrue(any(str(r.get("note_id")) == "0000000000000000000000f1" for r in rows),
                         "详情页没有写进 notes 表")
+
+    def test_watch_namespace_carries_the_author_gate(self):
+        """`cmd_watch` 拼的 Namespace 必须带 `no_new_authors`。
+
+        这一条与上面 ⑥ 同源，只是换了个字段：`cmd_watch` 手搓 Namespace 交给
+        `cmd_ingest`，而 argparse 那侧的字段叫 `no_new_authors`。名字对不上时
+        `_detail_rows` 读 `getattr(args, "no_new_authors", False)`——**默认值把错误吞掉了**，
+        于是「拒收外观作者」这个开关在 watch 通道里静默失效。
+
+        用 `getattr` 默认值兜底是合理的（它让旧 Namespace 不至于崩），
+        但「默认值」不能变成「永久默认」——所以这里直接查源码里传的是哪个名字。
+        """
+        source = (ROOT / "src" / "account_research" / "cli.py").read_text(encoding="utf-8")
+        watch_body = source.split("def cmd_watch", 1)[1]
+        self.assertIn("no_new_authors=getattr(args, \"no_new_authors\"", watch_body,
+                      "cmd_watch 传给 cmd_ingest 的字段名与 argparse 不一致")
+        self.assertNotIn("new_authors=not getattr", watch_body,
+                         "又用回了旧字段名：argparse 那侧叫 no_new_authors")
 
 
 class TestWatchDateIsTakenAtIngestTime(unittest.TestCase):

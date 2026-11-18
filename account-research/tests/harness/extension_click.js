@@ -31,6 +31,9 @@ const captureSrc = fs.readFileSync(process.argv[2], 'utf8');
 const MAX_MESSAGE_BYTES = 64 * 1024;
 // 桩里宿主声明的块大小（base64 字符数）。**故意设小**，让 60 KB 样本切成十几块。
 const STUB_CHUNK_CHARS = 8192;
+// 桩里的协议版本。必须跟着 capture.js 的 `PROTOCOL_VERSION` 走——
+// 写成常量而不是从源码里解析，是为了让「两边一起改」这件事在测试里**必须发生一次**。
+const STUB_PROTOCOL = 2;
 
 const log = { badge: [], uploads: [], errors: [], host: [], progress: [] };
 
@@ -119,9 +122,17 @@ function hostHandle(message) {
 
   switch (String(message.type || '')) {
     case 'hello':
-      return reply({ ok: true, protocol: 1, chunk_chars: STUB_CHUNK_CHARS, host: 'stub' });
+      // 协议版本必须与 capture.js 的 `PROTOCOL_VERSION` 一致，
+      // 否则扩展会在握手时就说「版本不匹配」——那正是 v2 想要的失败方式。
+      return reply({ ok: true, protocol: STUB_PROTOCOL, chunk_chars: STUB_CHUNK_CHARS, host: 'stub' });
     case 'begin':
-      sessions.set(session, { noteId: String(message.note_id || ''), chunks: [] });
+      // v2：`state` 与这次存档配对，落在同一个 session 里。
+      sessions.set(session, {
+        noteId: String(message.note_id || ''),
+        kind: String(message.kind || 'note'),
+        state: message.state || null,
+        chunks: [],
+      });
       return reply({ ok: true, chunks: 0 });
     case 'chunk': {
       const upload = sessions.get(session);
@@ -140,10 +151,11 @@ function hostHandle(message) {
       if (!upload) return reply({ ok: false, error: '还没 begin 就发 end' });
       const bytes = Buffer.concat(upload.chunks);
       if (!bytes.length) return reply({ ok: false, error: '这份存档是 0 字节' });
-      log.uploads.push({ noteId: upload.noteId, bytes, chunks: upload.chunks.length });
+      log.uploads.push({ noteId: upload.noteId, kind: upload.kind, bytes,
+                         chunks: upload.chunks.length, state: upload.state });
       return reply({
         ok: true, exit_code: 0, note_id: upload.noteId, bytes: bytes.length,
-        log: `✅ ${upload.noteId}：详情页（赞 318 / 藏 73 / 评 14）\nnotes：新增 1 行（校验先于落盘 ✅）`,
+        log: `✅ ${upload.noteId}：${upload.kind === 'profile' ? '主页' : '详情页'}\nnotes：新增 1 行（校验先于落盘 ✅）`,
       });
     }
     case 'status':
@@ -195,16 +207,24 @@ const chromeStub = {
       // 仿真 1：这一篇的存档是「文件-backed」的，arrayBuffer() 会抛 NotReadableError
       { id: 2, url: 'https://www.xiaohongshu.com/explore/6ad9810e00000000330219f4', status: 'complete', discarded: false },
       { id: 3, url: 'https://www.xiaohongshu.com/explore/6ac48e16000000001203ed6f', status: 'complete', discarded: true },
-      { id: 9, url: 'https://www.xiaohongshu.com/user/profile/abc', status: 'complete', discarded: false },
+      // v8：主页也要能采。它排在列表最后，靠「主页优先」的排序提到最前面。
+      { id: 4, url: 'https://www.xiaohongshu.com/user/profile/62c98736000000001501e075', status: 'complete', discarded: false },
+      // 既不是笔记也不是主页的页面（搜索结果页）——不该被当成候选。
+      { id: 9, url: 'https://www.xiaohongshu.com/search_result?keyword=abc', status: 'complete', discarded: false },
     ]),
   },
   scripting: {
     executeScript: async ({ target }) => ([{
       result: target.tabId === 1
         // tab 1：懒加载没滚完（16 张里只加载了 3 张）→ 应触发「有图没加载出来」提示
-        ? { isFullPage: true, noteId: 'y', hasState: false, totalImages: 16, loadedImages: 3 }
+        ? { isFullPage: true, kind: 'note', noteId: 'y', hasState: false, totalImages: 16, loadedImages: 3, state: null }
         // tab 2：正常整页
-        : { isFullPage: true, noteId: 'z', hasState: true, totalImages: 4, loadedImages: 4 },
+        : target.tabId === 4
+          // tab 4：主页。state 是它的唯一数据源，必须带上来。
+          ? { isFullPage: true, kind: 'profile', noteId: '62c98736000000001501e075',
+              hasState: true, totalImages: 0, loadedImages: 0, domCards: 32,
+              state: { user: { userPageData: { basicInfo: { nickname: '测试主页' } }, notes: [] } } }
+          : { isFullPage: true, kind: 'note', noteId: 'z', hasState: true, totalImages: 4, loadedImages: 4, state: null },
     }]),
   },
   pageCapture: {
@@ -287,10 +307,11 @@ function makeSandbox(context) {
   for (const line of log.host) console.log('  ', line);
   console.log('=== 存档次数 ===');
   console.log('  ', saveAttempts.map((item) => `tab${item.tabId}`).join(' '),
-    `（共 ${saveAttempts.length} 次，2 篇 → 有 3 次就说明重存生效了）`);
+    `（共 ${saveAttempts.length} 次；3 篇正常应 3 次，多出 1 次说明 tab1 的重存生效了）`);
   console.log('=== 宿主收到的文件 ===');
   for (const item of log.uploads) {
-    console.log(`   ${item.noteId}  ${item.bytes.length} B  分 ${item.chunks} 块`);
+    const statePart = item.state ? `  state ${JSON.stringify(item.state).length} 字符` : '  无 state';
+    console.log(`   ${item.kind} ${item.noteId}  ${item.bytes.length} B  分 ${item.chunks} 块${statePart}`);
   }
   console.log('=== 结果 ===');
   console.log('  ', JSON.stringify({
@@ -301,8 +322,9 @@ function makeSandbox(context) {
   if (log.errors.length) console.log('=== 控制台错误 ===', log.errors);
 
   const problems = [];
-  if (result.saved !== 2) {
-    problems.push(`应入库 2 篇，实际 ${result.saved}（失败 ${result.failed}：${result.failures}）`);
+  // 3 篇可采：主页 1（tab4）+ 笔记 2（tab1 重存 1 次、tab2 1 次）。
+  if (result.saved !== 3) {
+    problems.push(`应入库 3 篇（1 主页 + 2 笔记），实际 ${result.saved}（失败 ${result.failed}：${result.failures}）`);
   }
   if (result.readMethod !== 'FileReader') {
     problems.push(`文件-backed blob 应该靠 FileReader 读回来，实际用的是 ${result.readMethod}`);
@@ -321,11 +343,24 @@ function makeSandbox(context) {
   if (result.needReload !== 1) {
     problems.push(`应跳过 1 个休眠标签，实际 ${result.needReload}`);
   }
+  // v8：主页必须带上 state。`pageCapture` 把 `<script>` 剥了，
+  // 没有这份 state 的主页存档**解析出来是个空账号**——而它照样会显示「已入库 1 篇」。
+  const profileUpload = log.uploads.find((item) => item.kind === 'profile');
+  if (!profileUpload) {
+    problems.push('主页没有被上传——主页采集功能没生效');
+  } else if (!profileUpload.state || !profileUpload.state.user) {
+    problems.push('主页上传时没带 state：那篇主页会入库成一个没有粉丝/简介的空账号');
+  }
   // 关键：tab1 的第一次存档读不出来，**必须重新存一次**才成。
   // 只重读同一个句柄会一直失败——坏的是那个句柄，不是那一次调用。
-  if (saveAttempts.length !== 3) {
-    problems.push(`存档次数应为 3（2 篇 + tab1 重存一次），实际 ${saveAttempts.length}`
+  if (saveAttempts.length !== 4) {
+    problems.push(`存档次数应为 4（3 篇 + tab1 重存一次），实际 ${saveAttempts.length}`
       + ' —— 「读失败就重存一次」这条修复没生效');
+  }
+  // 失败必须带原因：v8 之前宿主只回 `ok:false`，扩展只能显示「宿主没回结果」，
+  // 而真实原因（拒收 / 找不到底行 / 存档坏）躺在 log 里，面板默认不展开它。
+  if (result.failures.some((text) => text.includes('宿主没回结果'))) {
+    problems.push('失败信息里还出现「宿主没回结果」——那是宿主没给原因时的假话兜底');
   }
 
   // ── 场景 B：在 **service worker** 里跑同一段代码。

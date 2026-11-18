@@ -5,13 +5,23 @@
 
 const MAX_TABS = 10;
 const NOTE_URL_RE = /(?:explore|discovery\/item)\/([0-9a-f]{24})/i;
+// 主页：`/user/profile/<account_id>`。v8 起也收——原来只认笔记页，于是
+// 「账号从哪来」这件事只能靠人 Ctrl+S 手动存，而扩展存在的意义就是替代那次手动。
+const PROFILE_URL_RE = /\/user\/profile\/([0-9a-f]{24})/i;
 // 必须与 `src/account_research/host.py` 的 HOST_NAME 一致，
 // 也与注册表项 `Software\Google\Chrome\NativeMessagingHosts\<这个名字>` 一致。
 const HOST_NAME = "com.account_research.capture";
-const PROTOCOL_VERSION = 1;
+// v8：上传协议多了「state 通道」。v1 的宿主会把 state 块当成 MHTML 块拼进去，
+// 结果是「文件看着完整、解析全错」——比直接断开难查得多。所以升版本，
+// 让旧宿主明说「版本不匹配」。
+const PROTOCOL_VERSION = 2;
 // 兜底的分块字符数，只在宿主没在 `hello` 里给 `chunk_chars` 时使用。
 // **正常路径永远走宿主声明的值**——两边各自硬编码一个数字，改了一边就会在生产上断线。
 const FALLBACK_CHUNK_CHARS = 96 * 1024;
+// state 的大小上限。实测主页 32 篇笔记时 `user` 子树约 48 KB，
+// 100 篇量级的号会到 150 KB 以上。给足余量，但**不能无上限**：
+// 一次上传几十兆 JSON 会把消息流拖死，而失败信息只有一句「宿主没回结果」。
+const MAX_STATE_CHARS = 4 * 1024 * 1024;
 
 // 采集期间**面板不能关**。原因：`pageCapture` 返回的是文件-backed 句柄，
 // 只有渲染进程（面板）能可靠读出字节；面板一关，这次采集就断了。
@@ -221,9 +231,18 @@ const AR = (function () {
     }
 
     // 一次完整上传：begin → chunk…（分块）→ end。
-    async upload({ noteId, base64 }) {
+    //
+    // `state` 只在 `begin` 里带 —— 它与这次存档是一对，不能拆开发。
+    // 拆开的后果：宿主收到一份「有 MHTML 但没 state」的上传，主页解析失败，
+    // 而失败要从两条独立消息的时序里推，等于让排查变成猜。
+    async upload({ targetId, kind, base64, state }) {
       const sessionId = `s${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      await this.request({ type: "begin", session: sessionId, note_id: noteId });
+      await this.request({
+        type: "begin", session: sessionId,
+        kind: kind || "note",
+        note_id: targetId,
+        state: state || null,
+      });
       const step = this.chunkChars;
       for (let offset = 0; offset < base64.length; offset += step) {
         const data = base64.slice(offset, offset + step);
@@ -268,6 +287,26 @@ const AR = (function () {
     return match ? match[1] : "";
   }
 
+  function matchProfileId(url) {
+    const match = String(url || "").match(PROFILE_URL_RE);
+    return match ? match[1] : "";
+  }
+
+  // 这个标签页要采哪一种页面。返回 `{kind, id}` 或 null（不采）。
+  //
+  // 为什么把「主页」也算进来（v8）：原来只认 `/explore/<id>`，于是主页只能靠人
+  // Ctrl+S 手动存。而扩展存在的全部意义就是**替代那次手动**——把最需要手动的一步
+  // 排除在外，等于插件只做了一半。实测主页 DOM 里 32 张卡片、粉丝数、小红书号全在，
+  // 但**数据源是 `__INITIAL_STATE__`**，而 `pageCapture` 会把它剥掉——所以必须同时
+  // 把 state 带回来（见 `probePage` 的 `state` 字段）。
+  function classifyTarget(url) {
+    const noteId = matchNoteId(url);
+    if (noteId) return { kind: "note", id: noteId };
+    const profileId = matchProfileId(url);
+    if (profileId) return { kind: "profile", id: profileId };
+    return null;
+  }
+
   // ── 主流程 ─────────────────────────────────────────────────────────────
   //
   // 返回一个**结构化结果**（不是字符串）：面板要按字段上色、要能显示「失败在哪一层」。
@@ -277,6 +316,7 @@ const AR = (function () {
     const result = {
       saved: 0, failed: 0, failures: [], bytes: 0,
       withoutState: 0, partialImages: 0, needReload: 0, skipped: 0,
+      profiles: 0, stateTooLarge: 0,
       total: 0, logs: [], readMethod: "",
     };
 
@@ -289,12 +329,19 @@ const AR = (function () {
       return result;
     }
 
-    const candidates = tabs.filter((tab) => tab.id && NOTE_URL_RE.test(tab.url || ""));
+    // v8 起同时认笔记页与主页。主页排前面：**先有账号，详情页才归得了档**
+    // （反过来的话，详情页会先去建一个「缺主页」的占位号，然后再被真主页替换，
+    //  白白多一轮写表，`ar status` 的「今日额度」也会把占位算成一次主页采集）。
+    const candidates = tabs.filter((tab) => tab.id && classifyTarget(tab.url || ""));
     if (!candidates.length) {
-      // 最常见的一种「没反应」：当前窗口里没有笔记页。
-      result.failures.push("当前窗口里没有小红书笔记页（先中键连开几篇）");
+      // 最常见的一种「没反应」：当前窗口里没有可采的小红书页面。
+      result.failures.push("当前窗口里没有小红书主页或笔记页（先中键连开几篇）");
       return result;
     }
+    candidates.sort((left, right) => {
+      const rank = (tab) => (classifyTarget(tab.url || "").kind === "profile" ? 0 : 1);
+      return rank(left) - rank(right);
+    });
     const targets = candidates.slice(0, MAX_TABS);
     result.total = targets.length;
     result.skipped = candidates.length - targets.length;
@@ -310,7 +357,8 @@ const AR = (function () {
 
     try {
       for (const [index, target] of targets.entries()) {
-        onProgress({ index, total: targets.length, noteId: matchNoteId(target.url || "") });
+        const kind = classifyTarget(target.url || "");
+        onProgress({ index, total: targets.length, noteId: kind ? kind.id : "" });
         if (target.discarded || target.status === "loading") {
           result.needReload += 1;
           continue;
@@ -344,10 +392,27 @@ const AR = (function () {
           result.failures.push(
             probe && probe.reason === "modal"
               ? "从主页点开的弹层（不是整页打开）"
-              : `无法识别页面（${(target.url || "").slice(-24)}）`
+              : probe && probe.reason === "profile_not_rendered"
+                ? "主页还没渲染出账号信息（等它加载完，或往下滚一屏再试）"
+                : `无法识别页面（${(target.url || "").slice(-24)}）`
           );
           result.failed += 1;
           continue;
+        }
+        if (kind.kind === "profile") result.profiles += 1;
+        // state 是主页的**唯一**数据源（`pageCapture` 把 `<script>` 剥了）。
+        // 没带上来就明说，不要让人对着一个「已入库 1 篇」的空账号发呆。
+        if (!probe.hasState && kind.kind === "profile") {
+          result.failures.push("主页读不到页面数据（__INITIAL_STATE__ 不存在）——粉丝/简介会是 ⬜");
+          result.failed += 1;
+          continue;
+        }
+        if (probe.state && probe.state.tooLarge) {
+          result.stateTooLarge += 1;
+          result.failures.push(
+            `页面数据 ${Math.round(probe.state.chars / 1024)} KB，超过单次上限 ${MAX_STATE_CHARS / 1024} KB——`
+            + `这次不带 state 上传（详情页仍可解析，主页会失败）`
+          );
         }
         if (!probe.hasState) result.withoutState += 1;
         // 懒加载提示：图没加载过，存下来的 MHTML 里就只剩远程 URL、本地没字节。
@@ -394,22 +459,28 @@ const AR = (function () {
         let reply;
         try {
           reply = await session.upload({
-            noteId: matchNoteId(target.url || "") || probe.noteId || "unknown",
+            targetId: kind.id || probe.noteId || "unknown",
+            kind: kind.kind,
             base64: converted.base64,
+            // state 与 MHTML 分两条流送：它很小（几十 KB），但**必须与那次存档配对**——
+            // 所以放在同一个 session 的 `begin` 里，不单独发一条「补 state」的消息。
+            state: probe.state && !probe.state.tooLarge ? probe.state : null,
           });
         } catch (error) {
           fail("入库", error);
           continue;
         }
         if (!reply || !reply.ok) {
-          result.failures.push(`入库✗ ${(reply && reply.error) || "宿主没回结果"}`);
+          // 宿主现在**一定**带 error（没有真原因时它自己也会说一句）。
+          // 兜底那句不再是「没回结果」——那是在替宿主撒谎：它明明回了。
+          result.failures.push(`入库✗ ${(reply && reply.error) || "宿主回了 ok=false 但没给原因"}`);
           result.failed += 1;
           continue;
         }
         result.saved += 1;
         result.bytes += blob.size;
         if (reply.log) result.logs.push(String(reply.log).trim());
-        onProgress({ index, total: targets.length, noteId: probe.noteId, done: true });
+        onProgress({ index, total: targets.length, noteId: kind.id, done: true });
       }
     } finally {
       session.close();
@@ -439,24 +510,88 @@ const AR = (function () {
   // 只读已渲染的 DOM 与已存在的 JS 对象；不发请求、不滚动、不点击平台控件。
   function probePage() {
     const NOTE_RE = /(?:explore|discovery\/item)\/([0-9a-f]{24})/i;
-    const match = location.href.match(NOTE_RE);
+    const PROFILE_RE = /\/user\/profile\/([0-9a-f]{24})/i;
+    const state = window.__INITIAL_STATE__;
+    const MAX_STATE_CHARS = 4 * 1024 * 1024;
+    const SNAP_SUBTREES = ["user", "note", "feed", "search"];
+
+    // `__INITIAL_STATE__` 是 Vue 的响应式对象，**直接 JSON.stringify 会踩两个坑**：
+    // ① 里面有 `new Map([])` / `undefined`，跨上下文回来的 JSON 会把它们变成 `{}` / 缺字段
+    //    （Python 侧 `clean_js_literals` 认得这些形状，所以这里**照原样**传，不要自己清洗）；
+    // ② 它可能很大（100 篇笔记的号能到 150 KB+），无上限传会把消息流拖死。
+    //
+    // 只取需要的子树：主页要 `user`，详情页要 `note`，搜索页要 `feed/search`。
+    // 不传整个 state 的另一个理由：里面混着登录态与采集者会话字段，**传得越少越好**。
+    function snapshotState() {
+      if (!state || typeof state !== "object") return null;
+      const picked = {};
+      for (const key of SNAP_SUBTREES) {
+        if (state[key] === undefined) continue;
+        try {
+          picked[key] = JSON.parse(JSON.stringify(state[key]));
+        } catch (error) {
+          // 某棵子树不可序列化（循环引用 / 函数）时**只丢那一棵**，不放弃整份。
+          // 丢掉的那一刻要留痕，否则「state 里怎么没有 note」会变成悬案。
+          picked[key] = null;
+        }
+      }
+      let text;
+      try {
+        text = JSON.stringify(picked);
+      } catch (error) {
+        return null;
+      }
+      if (text.length > MAX_STATE_CHARS) return { tooLarge: true, chars: text.length };
+      return picked;
+    }
+
+    function pageKind() {
+      const href = String(location.href || "");
+      if (NOTE_RE.test(href)) return "note";
+      if (PROFILE_RE.test(href)) return "profile";
+      if (document.title.indexOf("搜索") >= 0) return "search";
+      return "unknown";
+    }
+
+    const kind = pageKind();
+    if (kind === "profile") {
+      const profileId = (String(location.href).match(PROFILE_RE) || [])[1] || "";
+      // 主页没有 og:url 可判，靠 URL + state 里的昵称一起确认。
+      const basic =
+        state && state.user && state.user.userPageData && state.user.userPageData.basicInfo;
+      const hasProfile = Boolean(basic && basic.nickname);
+      const cards = document.querySelectorAll("section.note-item[data-note-id]");
+      return {
+        isFullPage: hasProfile,
+        kind: "profile",
+        noteId: profileId,
+        reason: hasProfile ? "" : "profile_not_rendered",
+        hasState: Boolean(state && state.user),
+        state: snapshotState(),
+        // 主页不需要统计图片加载张数：列表页的封面是懒加载的，而**封面不是正文**。
+        loadedImages: 0,
+        totalImages: 0,
+        domCards: cards.length,
+      };
+    }
+
+    const match = String(location.href).match(NOTE_RE);
     const noteId = match ? match[1] : "";
     if (!noteId) {
-      return { isFullPage: false, noteId: "", reason: "not_a_note" };
+      return { isFullPage: false, kind, noteId: "", reason: "not_a_note" };
     }
 
     // **必须是整页打开**，不能是从主页点开的弹层。
     const ogMeta = document.querySelector('meta[property="og:url"]');
     const ogUrl = ogMeta ? ogMeta.getAttribute("content") || "" : "";
     if (!NOTE_RE.test(ogUrl)) {
-      return { isFullPage: false, noteId, reason: "modal" };
+      return { isFullPage: false, kind: "note", noteId, reason: "modal" };
     }
 
     // 读 state 只为了**报告**它有没有（分享数/精确发布日靠它）；解析仍交给 Python 侧，
     // 保持「一份真相源」——这里不重算数字，否则两条路径迟早对不上。
     let hasState = false;
     try {
-      const state = window.__INITIAL_STATE__;
       const wrapper =
         state && state.note && state.note.noteDetailMap && state.note.noteDetailMap[noteId];
       hasState = !!(wrapper && wrapper.note);
@@ -485,13 +620,17 @@ const AR = (function () {
       totalImages = 0;
     }
 
-    return { isFullPage: true, noteId, hasState, loadedImages, totalImages };
+    return {
+      isFullPage: true, kind: "note", noteId, hasState,
+      state: snapshotState(),
+      loadedImages, totalImages,
+    };
   }
 
   return {
-    MAX_TABS, HOST_NAME, PROTOCOL_VERSION,
+    MAX_TABS, HOST_NAME, PROTOCOL_VERSION, MAX_STATE_CHARS,
     captureAll, readStatus, blobToBase64, readBlob, NativeSession,
-    hostHint, matchNoteId, probePage, KEEP_PANEL_OPEN,
+    hostHint, matchNoteId, matchProfileId, classifyTarget, probePage, KEEP_PANEL_OPEN,
   };
 })();
 
