@@ -132,3 +132,4 @@ git clone https://github.com/tataCrayon/market-research.git
 - **要新增一个调研 Skill** → 读 `docs/SKILL-AUTHORING.md`，复制 `skills/_template/`。
 - **要用现成的 Skill** → 读 `skills/<name>/SKILL.md`，或把它装进你所用工具的技能目录（见 README）。
 - **要改已有 Skill 的行为** → 先读它文末的「与其他 Skill 的关系」，确认没有越界改写别人的职责。
+- **要接续 account-research 的开发** → 先读 [`docs/handoff-account-research-2026-11-19.md`](docs/handoff-account-research-2026-11-19.md)：当前状态、待办优先级、换机器重建步骤，以及哪些本地资产（`account/`、`data/`）不入库、会丢。
