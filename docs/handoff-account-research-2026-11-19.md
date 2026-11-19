@@ -14,8 +14,8 @@
 
 | 项 | 值 |
 |---|---|
-| 分支 | `main`，**领先 origin/main 61 个提交（未 push）** |
-| 最新提交 | `8ff03f1 AI: fix(account-research): 采主页的判据改看 DOM，并补 DOM 解析腿` |
+| 分支 | `main`，**领先 origin/main 62 个提交（未 push）** |
+| 最新提交 | `a91c44f AI: docs: 新增 account-research 跨工具进度交接（v8.1 后存档）` |
 | 工作区 | 干净（`git status` 无改动） |
 | 单测 | `cd account-research && python -m pytest -q` → **590 passed** |
 | 扩展 | `extension/` **v8.1.0**，扩展 ID `onabfkpgiapeffmjogkdnhllamejdehm` |
@@ -26,7 +26,7 @@
 
 ## 二、这一轮（11-18 / 11-19）改了什么——别重新推导
 
-三次真机失败各牵出一层问题，已全部修完并提交：
+两次真机失败各牵出一层问题，已全部修完并提交：
 
 ### 提交 `cd31f0a` —— 采集端 v8（三环死锁）
 
