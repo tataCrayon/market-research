@@ -64,6 +64,7 @@ from .initialstate import (
     open_archive,
     state_sidecar_path,
 )
+from . import profile_dom
 from .parser import parse_account, parse_blocks, parse_notes
 from .stats import summarize
 from . import tokens as tokens_module
@@ -362,7 +363,13 @@ def cmd_probe(args: argparse.Namespace) -> int:
         owners = {str((card.get("user") or {}).get("userId")) for card in iter_note_cards(archive.state)}
         owners.discard("")
         print(f"  页面类型：{archive.kind}")
-        print(f"  笔记数：{len(archive.note_items)} | 作者数：{len(owners)} {sorted(owners)}")
+        if archive.kind == "profile_dom":
+            # DOM 腿没有 state，`note_items` 恒空。报 0 会让人以为「这页没笔记」，
+            # 而实际上卡片都在 DOM 里——用真正会被入库的那个解析器数。
+            cards = profile_dom.slices(archive.html)
+            print(f"  笔记数：{len(cards)}（DOM 腿；发布日与置顶缺）")
+        else:
+            print(f"  笔记数：{len(archive.note_items)} | 作者数：{len(owners)} {sorted(owners)}")
         print(f"  目标 userId：{list(archive.target_user_ids)} | 采集者 userId：{archive.viewer_user_id or '未登录'}")
         if archive.viewer_user_id and archive.viewer_user_id in archive.target_user_ids:
             print("  ⚠️ 采集者就是目标账号本人——数据可用，但『对标』语义不成立")
@@ -370,6 +377,34 @@ def cmd_probe(args: argparse.Namespace) -> int:
             print("  ⚠️ 同一页出现多个作者：疑似搜索页/推荐流误采，parse 会按目标 id 丢弃")
         print("  结论：✅ 可解析" if archive.usable else f"  结论：⏭ {REJECT_REASONS.get(archive.kind, '无法识别')}")
     return 0
+
+
+def _profile_rows(archive, collected_on: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[str], list[str]]:
+    """按存档类型选主页解析腿：`profile` 走 state，`profile_dom` 走 DOM。
+
+    **两条腿必须给出同形状的产物**（account 行 + notes 行 + 丢弃原因 + 缺陷清单），
+    否则下游每一处都要各写一遍分支，而分支迟早会漏。
+
+    为什么不在 `parser.parse_account` 里内部分支：那个函数读的是
+    `archive.state["user"]["userPageData"]`，签名里没有 html——
+    为了兼顾 DOM 腿而把 html 也塞进去，会让「这个字段到底从哪来」重新变模糊。
+    两个来源就写两个函数，在**这里**合流。
+
+    返回的第四项 `defects` 是「这条腿给不了什么」。state 腿恒为空（它什么都有）；
+    DOM 腿会说「发布日与置顶缺」。**不静默留空**——那是「解析器坏了」和
+    「通道给不了」之间唯一的分界线。
+    """
+    if archive.kind == "profile_dom":
+        account = profile_dom.parse_account(
+            archive.html, collected_on, source_file=archive.path.name,
+            account_id=(archive.target_user_ids[0] if archive.target_user_ids else ""),
+        )
+        notes, defects = profile_dom.parse_notes(
+            archive.html, account["account_id"], collected_on, source_file=archive.path.name)
+        return account, notes, [], defects
+    account = parse_account(archive, collected_on)
+    notes, dropped = parse_notes(archive, account["account_id"], collected_on)
+    return account, notes, dropped, []
 
 
 def cmd_parse(args: argparse.Namespace) -> int:
@@ -387,14 +422,15 @@ def cmd_parse(args: argparse.Namespace) -> int:
         if not archive.usable:
             print(f"⏭  {name}：{REJECT_REASONS.get(archive.kind, '无法识别')}")
             continue
-        account = parse_account(archive, args.on)
-        notes, dropped = parse_notes(archive, account["account_id"], args.on)
+        account, notes, dropped, defects = _profile_rows(archive, args.on)
         added_a, _ = store.append_rows(args.data, "accounts", [account])
         added_n, skipped_n = store.append_rows(args.data, "notes", notes)
         print(f"✅ {name}：{account['nickname']}（{account['account_id']}）笔记 {len(notes)} 篇"
               f" | 新增账号行 {added_a} / 新增笔记行 {added_n} / 去重跳过 {skipped_n}")
         for reason in dropped[:5]:
             print(f"   ⚠️ 归属不符已丢弃：{reason}")
+        for defect in defects:
+            print(f"   ⚠️ {defect}")
         parsed += 1
     if not parsed:
         print("没有任何文件被解析——检查文件是否为主页 SSR 存档。")
@@ -977,13 +1013,14 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                         continue
                 skipped.append((path, REJECT_REASONS.get(archive.kind, "无法识别")))
                 continue
-            account = parse_account(archive, args.on)
-            notes, dropped = parse_notes(archive, account["account_id"], args.on)
+            account, notes, dropped, defects = _profile_rows(archive, args.on)
             account_rows.append(account)
             note_rows.extend(notes)
             handled.append(path)
             extra = f"（丢弃非目标作者 {len(dropped)} 篇）" if dropped else ""
             print(f"✅ {path.name}：{account['nickname']} 笔记 {len(notes)} 篇{extra}")
+            for defect in defects:
+                print(f"   ⚠️ {defect}")
         else:
             blocks, errors = parse_blocks(path.read_text(encoding="utf-8", errors="replace"))
             for message in errors:

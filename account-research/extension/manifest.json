@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "小红书对标采集",
-  "version": "8.0.0",
+  "version": "8.1.0",
   "description": "把当前窗口里已打开的小红书主页与笔记页各存一份单文件 MHTML（含图）并直接入库（主页连页面数据一起带回）。不发请求、不导航、不开新页。",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsMNLCN1Qi3YTBjvOfblDiTcqf0m+VKQBDEBMg45vK0Nk1nYqrrfR+F77METiEFsLtNfj9DX7ZXrppb7in8gaHNZt/DJr+564Qyy5Eja3Pi8Fzg4m+JQxeELHoCmv6K19X5zuUN1zvhz7MZUFpQJISblG9vDbAq094ztjCFmldx0eRqrRTsV0+yo26fjLsR1i3D1TsIYVTT3yCMGIaVaMCZc4k62zBQ+mvFe+qV29gvYBKi719ZD5Vou8Db7raPbcoCSp+jbWheHcCKz2YjyoCF1GvY7luFuH7fSR2uPYKf58tESUfyzgdeQWr6UGMp7GDBOzPUvOtorD+IRDE5RxYwIDAQAB",
   "permissions": ["scripting", "pageCapture", "nativeMessaging"],

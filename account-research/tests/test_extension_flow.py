@@ -168,7 +168,7 @@ class TestProbePage(unittest.TestCase):
     def test_all_scenarios_hold(self):
         self.assertEqual(self.result.returncode, 0,
                          self.result.stdout + self.result.stderr)
-        self.assertIn("七个场景全部符合预期", self.result.stdout)
+        self.assertIn("八个场景全部符合预期", self.result.stdout)
 
     def test_profile_is_recognised_and_carries_state(self):
         line = next((row for row in self.result.stdout.splitlines()
@@ -176,6 +176,23 @@ class TestProbePage(unittest.TestCase):
         self.assertIn('"kind":"profile"', line)
         self.assertIn('"stateKeys":["user"]', line,
                       "主页应当只摘 user 子树；摘多了是白占带宽，摘少了解析不了")
+
+    def test_a_csr_profile_with_an_empty_state_is_still_collectable(self):
+        """**2026-11-19 真机那次的回归**。
+
+        小红书是 CSR：页面挂载后头部由接口填进 DOM，而首屏的
+        `__INITIAL_STATE__.user.userPageData` 是空的。v8.0 拿 state 里的昵称当
+        「渲染好了没」的门槛，于是**屏幕上明明完整的页面被判「还没渲染」**。
+
+        正确的判据是 `.user-name` 在不在 DOM 里。这条钉住：state 空 + DOM 齐 → 可采。
+        """
+        line = next((row for row in self.result.stdout.splitlines()
+                     if row.startswith("CSR 主页")), "")
+        self.assertIn('"isFullPage":true', line)
+        self.assertIn('"hasState":false', line,
+                      "state 里确实没有昵称时必须如实报 false（发布日会缺）")
+        self.assertIn('"nickname":"测试号"', line,
+                      "要带出 DOM 里的昵称，面板才能显示「在采哪个号」")
 
     def test_an_oversized_state_is_reported_not_silently_dropped(self):
         line = next((row for row in self.result.stdout.splitlines()

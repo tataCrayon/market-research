@@ -400,21 +400,29 @@ const AR = (function () {
           continue;
         }
         if (kind.kind === "profile") result.profiles += 1;
-        // state 是主页的**唯一**数据源（`pageCapture` 把 `<script>` 剥了）。
-        // 没带上来就明说，不要让人对着一个「已入库 1 篇」的空账号发呆。
-        if (!probe.hasState && kind.kind === "profile") {
-          result.failures.push("主页读不到页面数据（__INITIAL_STATE__ 不存在）——粉丝/简介会是 ⬜");
-          result.failed += 1;
-          continue;
+        // ⚠️ 主页**不再要求 state**（2026-11-19 改）。
+        //
+        // 原来的判据是「没有 `__INITIAL_STATE__` 就别采」——理由是主页的数据全在脚本里。
+        // 真机上这条把好页面挡住了：站点是 CSR，首屏 state 里 `userPageData` 是空的，
+        // 而头顶的昵称/粉丝数早就在 DOM 里了。
+        //
+        // 现在：DOM 有头部就采。state 缺席只意味着**发布日与置顶会缺**
+        // （页面上是相对时间、置顶卡无标记），Python 侧走 `profile_dom` 腿入库，
+        // 那两列写 ⬜ 并明说。
+        if (!probe.hasState) {
+          result.withoutState += 1;
+          if (kind.kind === "profile") {
+            result.failures.push(
+              "主页读不到页面数据（state 缺席）：仍会入库，但**发布日与置顶为空**");
+          }
         }
         if (probe.state && probe.state.tooLarge) {
           result.stateTooLarge += 1;
           result.failures.push(
             `页面数据 ${Math.round(probe.state.chars / 1024)} KB，超过单次上限 ${MAX_STATE_CHARS / 1024} KB——`
-            + `这次不带 state 上传（详情页仍可解析，主页会失败）`
+            + `这次不带 state 上传（页面仍可按 DOM 入库，发布日/置顶会缺）`
           );
         }
-        if (!probe.hasState) result.withoutState += 1;
         // 懒加载提示：图没加载过，存下来的 MHTML 里就只剩远程 URL、本地没字节。
         // 只能**提醒**，不能替人去滚——滚动会触发下载，那才是「程序制造请求」。
         if (probe.totalImages > probe.loadedImages) result.partialImages += 1;
@@ -556,22 +564,42 @@ const AR = (function () {
     const kind = pageKind();
     if (kind === "profile") {
       const profileId = (String(location.href).match(PROFILE_RE) || [])[1] || "";
-      // 主页没有 og:url 可判，靠 URL + state 里的昵称一起确认。
-      const basic =
-        state && state.user && state.user.userPageData && state.user.userPageData.basicInfo;
-      const hasProfile = Boolean(basic && basic.nickname);
+
+      // ⚠️ **不能只看 state 判断「渲染好了没有」。**
+      //
+      // 2026-11-19 真机实测：主页明明已经加载完（头像、粉丝数、32 张卡片都在屏幕上），
+      // 面板却报「主页还没渲染出账号信息」。原因是这一版的判据
+      // 走的是 `window.__INITIAL_STATE__`——而小红书是 **CSR**：
+      // 首屏的 state 里 `user.userPageData` 是**空的**，账号头部由挂载后的
+      // 接口请求填进 DOM。于是「state 有昵称」这个门槛永远过不了。
+      //
+      // 正确的判据是**看屏幕上有没有东西**：`.user-name` 是主页头部的昵称容器，
+      // 它出现就说明头部渲染完了（Python 侧的 `profile_dom` 用的正是同一个选择器）。
+      // state 只用来**加分**（发布日/置顶/精确计数），不再用来**决定能不能采**。
+      const nameEl = document.querySelector(".user-name");
+      const nickname = nameEl ? String(nameEl.textContent || "").trim() : "";
       const cards = document.querySelectorAll("section.note-item[data-note-id]");
+      const basic =
+        (state && state.user && state.user.userPageData && state.user.userPageData.basicInfo) || {};
+      const hasState = Boolean(basic && basic.nickname);
+      const hasDomHeader = Boolean(nickname);
+
       return {
-        isFullPage: hasProfile,
+        // 头部渲染出来就可采；DOM 与 state 任一有昵称都算。
+        isFullPage: hasDomHeader || hasState,
         kind: "profile",
         noteId: profileId,
-        reason: hasProfile ? "" : "profile_not_rendered",
-        hasState: Boolean(state && state.user),
+        reason: hasDomHeader || hasState ? "" : "profile_not_rendered",
+        // `hasState` 的语义是「页面脚本里有这份数据」——它决定**发布日与置顶能不能补**，
+        // 不决定这次能不能采。面板会按它提示「这两列会缺」。
+        hasState,
         state: snapshotState(),
         // 主页不需要统计图片加载张数：列表页的封面是懒加载的，而**封面不是正文**。
         loadedImages: 0,
         totalImages: 0,
         domCards: cards.length,
+        // 面板拿它显示「采到了哪个号」——采之前就该看得见，而不是采完才知道。
+        nickname,
       };
     }
 

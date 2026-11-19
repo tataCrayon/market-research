@@ -35,12 +35,20 @@ function makePage({
   cards = 0,
   state = undefined,
   stateThrows = false,
+  // DOM 里的 `.user-name` 文本。`null` = 头部还没渲染。
+  domNickname = null,
 } = {}) {
   const document = {
     title,
     querySelector(selector) {
       if (selector === 'meta[property="og:url"]') {
         return ogUrl === null ? null : { getAttribute: () => ogUrl };
+      }
+      // v8.1：主页的判据是 **DOM 里有没有 `.user-name`**，不再看 state。
+      // 桩必须能给出「有头部」与「没头部」两种页面，否则真机上那次
+      // 「明明加载好了却报没渲染」的 bug 永远测不出来。
+      if (selector === '.user-name') {
+        return domNickname === null ? null : { textContent: domNickname };
       }
       return null;
     },
@@ -84,7 +92,7 @@ function expect(condition, message) {
   if (!condition) problems.push(message);
 }
 
-// ── 场景 1：主页。state 是唯一数据源，必须摘出 `user` 并报 hasState。
+// ── 场景 1：主页，DOM 与 state 都在。必须摘出 `user` 并报 hasState。
 const profileState = {
   user: {
     userPageData: { basicInfo: { nickname: '测试号' }, interactions: [] },
@@ -99,6 +107,7 @@ const profile = runPage(makePage({
   title: '测试号 - 小红书',
   ogUrl: null,
   cards: 32,
+  domNickname: '测试号',
   state: profileState,
 }));
 console.log('主页：', JSON.stringify({
@@ -107,7 +116,7 @@ console.log('主页：', JSON.stringify({
   stateKeys: profile.state ? Object.keys(profile.state) : null,
 }));
 expect(profile.kind === 'profile', `主页被判成了 ${profile.kind}`);
-expect(profile.isFullPage === true, '主页应当可采（basicInfo.nickname 在）');
+expect(profile.isFullPage === true, '主页应当可采（头部已渲染）');
 expect(profile.hasState === true, '主页必须报 hasState');
 expect(profile.noteId === '62c98736000000001501e075', `主页 id 错了：${profile.noteId}`);
 expect(profile.domCards === 32, `卡片数错了：${profile.domCards}`);
@@ -116,10 +125,32 @@ expect(profile.state && profile.state.user, '主页没把 user 子树摘出来')
 // 整个 state 里混着登录态与采集者会话字段，传得越少越好。
 expect(profile.state && profile.state.extra === undefined, '带上了不在白名单里的子树');
 
-// ── 场景 2：主页但还没渲染（basicInfo 空的）→ 必须明确说原因，不能静默算成功
+// ── 场景 1b：**真机那次翻车**。主页已经渲染好（昵称与卡片都在 DOM 里），
+//    但 `__INITIAL_STATE__.user.userPageData` 是空的——站点是 CSR，首屏 state 没数据。
+//    v8.0 用「state 里有昵称」当门槛，于是这个页面被判「还没渲染」，
+//    用户在屏幕前看着完整的页面却采不了。
+const csrProfile = runPage(makePage({
+  href: 'https://www.xiaohongshu.com/user/profile/62c98736000000001501e075',
+  title: '测试号 - 小红书',
+  ogUrl: null,
+  cards: 32,
+  domNickname: '测试号',
+  state: { user: { userPageData: {}, activeTab: {} } },
+}));
+console.log('CSR 主页（state 空、DOM 齐）：', JSON.stringify({
+  isFullPage: csrProfile.isFullPage, hasState: csrProfile.hasState, nickname: csrProfile.nickname,
+}));
+expect(csrProfile.isFullPage === true,
+  'DOM 里有头部就必须可采——state 空不等于页面没渲染（2026-11-19 真机 bug）');
+expect(csrProfile.hasState === false, 'state 里没有昵称时要如实报 hasState=false（发布日会缺）');
+expect(csrProfile.nickname === '测试号', '没把 DOM 里的昵称带出来，面板无法显示「在采哪个号」');
+
+// ── 场景 1c：主页但**真的**还没渲染（DOM 与 state 都没有昵称）→ 明说原因
 const blankProfile = runPage(makePage({
   href: 'https://www.xiaohongshu.com/user/profile/62c98736000000001501e075',
   ogUrl: null,
+  cards: 0,
+  domNickname: null,
   state: { user: { userPageData: {} } },
 }));
 console.log('未渲染主页：', JSON.stringify({
@@ -199,5 +230,5 @@ if (problems.length) {
   for (const item of problems) console.log('❌', item);
   process.exit(1);
 }
-console.log('✅ probePage 的七个场景全部符合预期');
+console.log('✅ probePage 的八个场景全部符合预期');
 process.exit(0);

@@ -130,7 +130,7 @@ class TestManifest(unittest.TestCase):
 
     def test_version_and_description_match_what_it_saves(self):
         """清单里的话必须对得上行为。v2 的描述写「各存一个 txt」——那正是要改掉的老行为。"""
-        self.assertEqual(self.manifest["version"], "8.0.0")
+        self.assertEqual(self.manifest["version"], "8.1.0")
         self.assertIn("MHTML", self.manifest["description"])
         self.assertIn("含图", self.manifest["description"])
         # v8：描述里必须出现「主页」。它不再只是笔记采集器——

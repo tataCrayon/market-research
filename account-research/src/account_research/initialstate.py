@@ -44,7 +44,14 @@ class Archive:
 
     @property
     def usable(self) -> bool:
-        return self.kind == "profile"
+        """能不能按「主页」入库。
+
+        两个 kind 都算：
+        - `profile`：state 通道（Ctrl+S / 旁车），发布日与置顶齐全；
+        - `profile_dom`：只有渲染后的 DOM（扩展的 pageCapture），
+          发布日与置顶缺，其余都在。**缺两列不等于整份存档不能用。**
+        """
+        return self.kind in ("profile", "profile_dom")
 
 
 STATE_FROM_HTML = "html"
@@ -311,6 +318,28 @@ def extract_title(html: str) -> str:
     return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
 
 
+def profile_id_from_url(url: str) -> str:
+    """从 `/user/profile/<id>` 里取 account_id。取不到返回空串。
+
+    为什么单独一个函数：主页存档的 `og:url` 是
+    `https://xiaohongshu.com/user/profile/<id>`——**没有** `www` 前缀。
+    原来只按 `/explore/<id>` 判详情页，于是主页在这条判断上一直是空值。
+    """
+    match = re.search(r"/user/profile/([0-9a-f]{24})", url or "", re.I)
+    return match.group(1).lower() if match else ""
+
+
+def looks_like_profile_dom(html: str) -> bool:
+    """这份 HTML 的 **DOM** 里有没有主页头部。
+
+    ⚠️ 不能 import `profile_dom`（它会反过来 import 本模块的 `Archive`，
+    形成循环）。所以这里只保留一个最小判据：`.user-name` 容器。
+    真正的 DOM 解析在 `profile_dom.py`，两边共用同一个选择器字符串常量不值得——
+    一旦它漂了，`tests/test_profile_dom.py` 会红。
+    """
+    return bool(re.search(r'<div[^>]*\bclass="user-name"[^>]*>', html or "", re.I))
+
+
 def classify(state: dict[str, Any], title: str = "", og_url_value: str = "") -> str:
     """按「证据强度」排序判别，不按文件名（文件名是假信号，见 case-001 §2 F1）。
 
@@ -364,7 +393,11 @@ def open_archive(path: str | Path) -> Archive:
     |---|---|---|
     | `html` | Ctrl+S「网页，全部」 | 主页 + 详情页 |
     | `sidecar` | 扩展采集（`<name>.state.json`） | 主页 + 详情页 |
-    | `none` | 只有 DOM | 仅详情页（og:url 可判） |
+    | `none` | 只有 DOM | 详情页（og:url 可判）或主页（`.user-name` 在） |
+
+    ⚠️ 2026-11-19 修：原来第三档只对详情页开口，主页一律抛错。真机上「扩展采主页」
+    因此完全不可用——而那份 DOM 里昵称/粉丝/卡片一个都不少。
+    现在主页也走 `profile_dom`（发布日与置顶缺，其余齐全）。
 
     **三档必须都留下痕迹**（`Archive.state_source`），否则事后没人能回答
     「这个粉丝数是从页面脚本读的，还是从别处来的」。
@@ -388,16 +421,29 @@ def open_archive(path: str | Path) -> Archive:
         if sidecar:
             state = sidecar
             source = STATE_FROM_SIDECAR
-        # ② 还是空：详情页可以只靠 DOM（主页不行，它的数据全在 state 里）。
+        # ② 详情页可以只靠 DOM（og:url 能判）。
         elif og and re.search(r"/(?:explore|discovery/item)/[0-9a-f]{24}", og, re.I):
             return Archive(path=file_path, kind="note_detail", state={}, title=title,
                            og_url=og, html=html, state_source=STATE_ABSENT)
+        # ③ **主页也可以只靠 DOM**（2026-11-19 起）。原来这里直接抛错，
+        #    于是「扩展采主页」必须依赖旁车；而旁车只在带 `<script>` 的存档里才有。
+        #    实测主页的昵称/小红书号/简介/IP/粉丝/关注/获赞、以及全部卡片
+        #    （id/标题/赞/形式）都在渲染后的 DOM 里。缺的只有**发布日与置顶**
+        #    （页面上是「3 天前」这种相对值，置顶卡与普通卡长得一模一样）。
+        #    缺两列可以补旁车，但**不能因此整份存档不能用**——
+        #    那等于为了两个字段拒绝整页数据。
+        elif looks_like_profile_dom(html):
+            owner = profile_id_from_url(og)
+            return Archive(path=file_path, kind="profile_dom", state={}, title=title,
+                           og_url=og, html=html, state_source=STATE_ABSENT,
+                           target_user_ids=(owner,) if owner else ())
         else:
             raise ArchiveError(
                 f"{exc} 也没有 {file_path.stem}{STATE_SIDECAR_SUFFIX} 旁车——"
                 f"这条通道（扩展的 pageCapture）会把 <script> 剥掉，"
-                f"主页必须靠旁车里的 state 才能解析。"
-                f"用扩展重采一次，或改用 Ctrl+S 选「网页，全部」。"
+                f"而这份页面连 DOM 里都没有账号头部（`.user-name`），"
+                f"所以既不能走 state 也不能走 DOM。"
+                f"等页面加载完再采一次，或改用 Ctrl+S 选「网页，全部」。"
             ) from exc
     return Archive(
         path=file_path,
