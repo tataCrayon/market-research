@@ -116,11 +116,11 @@ account-research/                  产品项目（形态特例，2026-10-22 从 
 ├── agent/account-analyst.md        Agent 契约：七条禁止 + 动作自治上限 + 评估证据
 ├── src/account_research/           确定性处理层（Python 标准库，零依赖）：解析 / 六张表 / V1–V8 / 统计 / 图片通道 / 拆解编排
 ├── src/parser/                     P3 解析器早期落点（保留作参考实现）
-├── extension/                      浏览器扩展：详情页一键存档（替代 Ctrl+A → 记事本 → 存盘）
+├── extension/                      浏览器扩展 v8.1：主页 + 详情页一键存 MHTML 并直接入库（不用终端）
 ├── tools/                          运维小工具：待采优先级板、列名体检、书签小工具源码
 ├── web/                            副端 PC Web 工具（纯客户端解析；触发条件见其 README，暂占位）
-├── tests/                          196 个验收测试（代码入库，fixtures 指向 ../account/ 不入库）
-├── docs/                           产品工程文档：方向卡、PRD、case 复盘、图片通道、Agent 运行记录
+├── tests/                          590 个验收测试（代码入库，fixtures 指向 ../account/ 不入库）
+├── docs/                           产品工程文档：方向卡、PRD、case 复盘、图片通道、Agent 运行记录、进度交接
 └── data/                           六张结构化表 + debrief 运行产物（gitignore）
 ```
 
@@ -146,6 +146,7 @@ account-research/                  产品项目（形态特例，2026-10-22 从 
 - [`docs/SKILL-AUTHORING.md`](docs/SKILL-AUTHORING.md) —— 怎么写一个合格的调研 Skill（骨架、铁律、检索技巧、失败模式）
 - [`docs/dual-mirror-review.md`](docs/dual-mirror-review.md) —— **报告双镜自审通用协议**（grill-method 方法镜 × practitioner-review 落地镜，八轴通用）：所有调研 Skill 交付前的统一自审标准动作
 - [`docs/lessons-learned.md`](docs/lessons-learned.md) —— 实证记录：真实调研里踩过的坑，只追加不改写
+- [`docs/handoff-account-research-2026-11-19.md`](docs/handoff-account-research-2026-11-19.md) —— **account-research 的进度交接**：换工具 / 换机器后先读这一份（状态、待办、环境、本地未入库资产）
 
 ## 同步（维护者）
 

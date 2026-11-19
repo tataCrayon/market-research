@@ -2,6 +2,9 @@
 
 > **产品定位**：把「对标账号为什么能做起来」变成**有证据、有判决**的拆解报告——唯一把对标拆解做成有封闭判决、有证据分级、有 ⬜ 纪律、有双镜自审的 AI 产品。
 > **形态判决**（见 [`../docs/product-research-account-research-2026-10-21.md`](../docs/product-research-account-research-2026-10-21.md)）：🔧 改方向——**Skill 先行、Web 放大**。采集行为的产物是 HTML 文件，Skill 形态下「把 HTML 贴给 AI」是「保存 HTML」的自然延伸；PC Web 工具（纯客户端解析）作为放大路径，触发条件见 `web/README.md`。
+>
+> **换工具 / 换机器？** 先读 [`../docs/handoff-account-research-2026-11-19.md`](../docs/handoff-account-research-2026-11-19.md)：
+> 那里有当前状态、待办优先级、环境重建步骤，以及哪些本地资产（`account/`、`data/`）不入库、会丢。
 
 ## 目录导览
 

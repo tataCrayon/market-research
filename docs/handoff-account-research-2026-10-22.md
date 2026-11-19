@@ -1,5 +1,9 @@
 # 进度交接：account-research（2026-10-22 00:30 存档）
 
+> **⚠️ 本文件已过时。** 最新交接见 [`handoff-account-research-2026-11-19.md`](handoff-account-research-2026-11-19.md)——
+> 采集端已从「Ctrl+S + 终端」演进到「浏览器扩展一次点击」，本文第三、四节的待办已全部完成。
+> 保留本文件只为留存 v0.2.0 时期的状态与当时的推理。
+
 > **用途**：跨机器接续。另一台电脑 `git pull` 后读本文件即可恢复全部上下文。
 > **真相源**：本仓库 `tataCrayon/market-research`（main 分支）。本地 `.workbuddy/memory/` 被 gitignore，不随仓库同步——关键信息已誊入本文件。
 >
