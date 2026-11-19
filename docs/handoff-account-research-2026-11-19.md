@@ -14,8 +14,8 @@
 
 | 项 | 值 |
 |---|---|
-| 分支 | `main`，**领先 origin/main 62 个提交（未 push）** |
-| 最新提交 | `a91c44f AI: docs: 新增 account-research 跨工具进度交接（v8.1 后存档）` |
+| 分支 | `main`，**本地领先 origin/main 且未 push**（差多少现查：`git rev-list --count origin/main..HEAD`） |
+| 最新提交 | 现查 `git log --oneline -1`——**这里不写死**，写死的提交号下一次提交就过期 |
 | 工作区 | 干净（`git status` 无改动） |
 | 单测 | `cd account-research && python -m pytest -q` → **590 passed** |
 | 扩展 | `extension/` **v8.1.0**，扩展 ID `onabfkpgiapeffmjogkdnhllamejdehm` |
