@@ -1,4 +1,4 @@
-# 进度交接：account-research（2026-11-19 15:10 存档）
+# 进度交接：account-research（2026-11-19 15:30 存档）
 
 > **用途**：换工具 / 换机器接续。新会话先读这一份，再决定动哪里。
 > **真相源**：本仓库 `tataCrayon/market-research` main 分支。
@@ -187,22 +187,49 @@ python ar.py extension         # 扩展与宿主的安装状态
 
 **编辑纪律**：UTF-8 文件不要走 shell 文本往返；`data-layer.md` 上 `edit` 工具会报
 `ReplaceFileW EIO`，用显式 `encoding="utf-8", newline=""` 的 Python 脚本改。
+`write` 也会在个别文件上撞同一个错，重试一次或用 Python 脚本兜底。
+
+**一条会「偶发」红的测试**：`tests/test_watch.py::test_detail_page_goes_all_the_way_through`
+跑的是完整详情页入库，**会真的加载 local OCR 引擎**（rapidocr-onnxruntime）。
+机器内存紧张时它会在最后一步打印
+`OpenBLAS error: Memory allocation still failed after 10 retries` 然后退出非 0，
+于是那条断言「本次自动入库 1 个文件」失败——**它测的逻辑已经过了**（详情页解析、写表都成功了），
+失败发生在之后的 OCR 环节。
+
+判断方法：看输出里有没有 `✅ …详情页 note_id=…` 和 `notes：新增 1 行`。
+有 → 是环境内存问题，不是回归；紧接着重跑一次通常就绿。
+**不要为了让它过而把断言改松**——那条断言守的正是「详情页能走完整条路」。
+（2026-11-19 实测出现过一次，重跑即过，590 全绿。）
 
 ---
 
 ## 七、下一句该说什么（给自己/新工具的第一条指令）
 
-> 「读 `docs/handoff-account-research-2026-11-19.md`，先跑 `ar status` 看 6 条告警，
+> 「读 `docs/handoff-account-research-2026-11-19.md`，先跑 §七 的自查清单，
 > 然后把 D2 那三条假设结案。之后按 P2 帮我选第三个账号。」
 
 如果要继续做功能而不是补数据，优先级是**搜索页采集**（P3 第一项）——
 它是目前唯一还没接上的采集通道，但**必须产出候选清单、不能直接写 `notes`**。
+
+### 交接自查清单（新工具接手前先跑一遍）
+
+| # | 动作 | 期望 |
+|---|---|---|
+| 1 | `git status --porcelain` | 空（干净） |
+| 2 | `cd account-research && python -m pytest -q` | `590 passed` |
+| 3 | `python ar.py validate` | `0 ERROR / 0 WARN` |
+| 4 | `python ar.py selftest` | `15/15 通过`（无 `account/` 时是 SKIP，**不是 PASS**） |
+| 5 | `python ar.py status` | 6 条告警 + 一句「下一步」 |
+| 6 | `python ar.py extension` | 扩展 `8.1.0` + 宿主「已注册」 |
+
+第 2 项若只有 `test_detail_page_goes_all_the_way_through` 一条红，先看 §六那条
+「会偶发红的测试」——那是 OCR 引擎的内存问题，不是回归，重跑通常就绿。
 
 ---
 
 ## 八、一句话总结这轮学到的东西
 
 前两轮修的都不是「功能没做」，而是**判据取错了地方**：
-拿 state 判「页面渲染好了没」（该看 DOM），拿账号表判「这篇能不能收」（该看作者链接）。
-三次真机失败，三次都是**代码相信了一个变量，而人相信了眼睛**。
+拿 state 判「页面渲染好了没有」（该看 DOM），拿账号表判「这篇能不能收」（该看作者链接）。
+两次真机失败，两次都是**代码相信了一个变量，而人相信了眼睛**。
 新的判据一律落在**产物**上，不落在「我认为会填这个数据的中间变量」上。
