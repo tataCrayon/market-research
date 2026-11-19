@@ -14,9 +14,9 @@
 
 | 项 | 值 |
 |---|---|
-| 分支 | `main`，**本地领先 origin/main 且未 push**（差多少现查：`git rev-list --count origin/main..HEAD`） |
+| 分支 | `main`，**已与 origin/main 同步**（差多少现查：`git rev-list --count origin/main..HEAD` / `git status -sb`） |
 | 最新提交 | 现查 `git log --oneline -1`——**这里不写死**，写死的提交号下一次提交就过期 |
-| 工作区 | 干净（`git status` 无改动） |
+| 工作区 | 干净（`git status --porcelain` 无输出） |
 | 单测 | `cd account-research && python -m pytest -q` → **590 passed** |
 | 扩展 | `extension/` **v8.1.0**，扩展 ID `onabfkpgiapeffmjogkdnhllamejdehm` |
 | 宿主 | 已注册（`.host/com.account_research.capture.json`），协议 **v2**，`ar host --doctor` 全绿 |
